@@ -386,6 +386,8 @@ class GNSServer {
             GNSInfoPacket info=PublicInfo(GNS_INFO,0);if(!SendTransport(event->m_hConn,&info,sizeof(info),false))Drop(event->m_hConn,"Cannot send server information");
         } else if(event->m_info.m_eState==k_ESteamNetworkingConnectionState_ClosedByPeer||event->m_info.m_eState==k_ESteamNetworkingConnectionState_ProblemDetectedLocally){
             if(peers.find(event->m_hConn)!=peers.end()){stdPlatform_Printf("GeoSith connection ended: %s\n",event->m_info.m_szEndDebug);Drop(event->m_hConn,event->m_info.m_szEndDebug);}
+            // Added: close connections that fail before entering the accepted-peer map
+            else api->CloseConnection(event->m_hConn,0,nullptr,false);
         }
     }
     void Authenticate(HSteamNetConnection conn,const void *data,int length) {

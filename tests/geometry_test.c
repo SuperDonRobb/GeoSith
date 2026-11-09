@@ -12,6 +12,63 @@
 #include "placed_fixture.h"
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"FAIL %s:%d: %s\n",__FILE__,__LINE__,#x);exit(1);}}while(0)
 static EdModel *m,*backup;
+template<size_t N> static void checkTerminatedWireText(const char (&source)[N],const char (&decoded)[N]){
+    CHECK(source[N-1]!=0);CHECK(decoded[N-1]==0);CHECK(!memcmp(source,decoded,N-1));
+}
+static void wireTextTests(void){
+    /* A received fixed-width field need not contain a NUL. Decode must bound
+       every string without consuming a byte from the next field. */
+    edDefault(m);
+    memset(m->spawns[0].attributes.aiClass,'A',sizeof(m->spawns[0].attributes.aiClass));
+    memset(m->header.title,'T',sizeof(m->header.title));memset(m->header.colormap,'C',sizeof(m->header.colormap));
+    for(int i=0;i<20;i++)memset(m->header.intro[i],'a'+i,sizeof(m->header.intro[i]));
+    m->header.gravity=7.25;m->header.ceilingSkyZ=13.5;
+    m->objectCount=1;EdObject *object=&m->objects[0];
+    memset(object->templateName,'O',sizeof(object->templateName));object->position=edV(1.25,2.5,3.75);object->rotation=edV(4.5,5.25,6.75);
+    memset(object->attributes.aiClass,'I',sizeof(object->attributes.aiClass));
+    m->lightCount=1;m->lights[0]=EdLight{3,edV(2,4,6),.75,8};
+    memset(m->episode.title,'E',sizeof(m->episode.title));m->episode.type=2;m->episode.count=2;m->episode.current=1;
+    for(int i=0;i<2;i++){EdEpisodeRow *row=&m->episode.rows[i];row->line=73+i;row->cd=1+i;row->level=5+i;row->gotoA=-1;row->gotoB=-1;
+        memset(row->file,'F'+i,sizeof(row->file));memset(row->title,'R'+i,sizeof(row->title));
+        for(int j=0;j<20;j++)memset(row->intro[j],'A'+j+i,sizeof(row->intro[j]));}
+    m->cogCount=1;EdPlacedCog *cog=&m->cogs[0];memset(cog->file,'G',sizeof(cog->file));cog->count=1;
+    EdCogParam *param=&cog->params[0];memset(param->name,'N',sizeof(param->name));memset(param->value,'V',sizeof(param->value));param->type=ED_COG_INT;param->cell=7;param->face=11;
+    m->assetCount=1;memset(m->assets[0].name,'M',sizeof(m->assets[0].name));m->assets[0].origin=edV(8.25,9.5,10.75);m->assets[0].saved=1;
+    m->templateCount=1;EdTemplate *t=&m->templates[0];memset(t->name,'B',sizeof(t->name));memset(t->parent,'P',sizeof(t->parent));t->count=1;
+    memset(t->params[0].key,'K',sizeof(t->params[0].key));memset(t->params[0].value,'Q',sizeof(t->params[0].value));
+    m->c[0].ambientLight=.125;m->c[0].extraLight=.625;memset(m->c[0].sound,'S',sizeof(m->c[0].sound));m->c[0].soundVolume=.375;m->c[0].tolerance=ED_IMPORT_EPS;
+    memset(m->c[0].colormap,'J',sizeof(m->c[0].colormap));memset(m->c[0].layer,'L',sizeof(m->c[0].layer));
+    m->c[0].f[0].uvRotation=.625;m->c[0].f[0].v[0].light=.25;
+    uint32_t size=0;unsigned char *wire=edWireEncode(m,&size);CHECK(wire&&edWireDecode(backup,wire,size));edFree(wire);
+    checkTerminatedWireText(m->spawns[0].attributes.aiClass,backup->spawns[0].attributes.aiClass);
+    checkTerminatedWireText(m->header.title,backup->header.title);checkTerminatedWireText(m->header.colormap,backup->header.colormap);
+    for(int i=0;i<20;i++)checkTerminatedWireText(m->header.intro[i],backup->header.intro[i]);
+    CHECK(backup->header.gravity==7.25&&backup->header.ceilingSkyZ==13.5);
+    CHECK(backup->objectCount==1);checkTerminatedWireText(object->templateName,backup->objects[0].templateName);checkTerminatedWireText(object->attributes.aiClass,backup->objects[0].attributes.aiClass);
+    CHECK(backup->objects[0].position.x==1.25&&backup->objects[0].position.y==2.5&&backup->objects[0].position.z==3.75&&backup->objects[0].rotation.z==6.75);
+    CHECK(backup->lightCount==1&&backup->lights[0].type==3&&backup->lights[0].intensity==.75&&backup->lights[0].range==8);
+    checkTerminatedWireText(m->episode.title,backup->episode.title);CHECK(backup->episode.type==2&&backup->episode.count==2&&backup->episode.current==1);
+    for(int i=0;i<2;i++){const EdEpisodeRow *source=&m->episode.rows[i],*decoded=&backup->episode.rows[i];
+        CHECK(decoded->line==73+i&&decoded->cd==1+i&&decoded->level==5+i&&decoded->gotoA==-1&&decoded->gotoB==-1);
+        checkTerminatedWireText(source->file,decoded->file);checkTerminatedWireText(source->title,decoded->title);
+        for(int j=0;j<20;j++)checkTerminatedWireText(source->intro[j],decoded->intro[j]);}
+    CHECK(backup->cogCount==1&&backup->cogs[0].count==1);checkTerminatedWireText(cog->file,backup->cogs[0].file);
+    checkTerminatedWireText(param->name,backup->cogs[0].params[0].name);checkTerminatedWireText(param->value,backup->cogs[0].params[0].value);
+    CHECK(backup->cogs[0].params[0].type==ED_COG_INT&&backup->cogs[0].params[0].cell==7&&backup->cogs[0].params[0].face==11);
+    CHECK(backup->assetCount==1&&backup->meshCount==0);checkTerminatedWireText(m->assets[0].name,backup->assets[0].name);
+    CHECK(backup->assets[0].origin.x==8.25&&backup->assets[0].origin.y==9.5&&backup->assets[0].origin.z==10.75&&backup->assets[0].saved==1);
+    CHECK(backup->templateCount==1&&backup->templates[0].count==1);checkTerminatedWireText(t->name,backup->templates[0].name);checkTerminatedWireText(t->parent,backup->templates[0].parent);
+    checkTerminatedWireText(t->params[0].key,backup->templates[0].params[0].key);checkTerminatedWireText(t->params[0].value,backup->templates[0].params[0].value);
+    CHECK(backup->count==1&&backup->c[0].count==6&&backup->c[0].ambientLight==.125&&backup->c[0].extraLight==.625);
+    checkTerminatedWireText(m->c[0].sound,backup->c[0].sound);CHECK(backup->c[0].soundVolume==.375&&backup->c[0].tolerance==ED_IMPORT_EPS);
+    checkTerminatedWireText(m->c[0].colormap,backup->c[0].colormap);checkTerminatedWireText(m->c[0].layer,backup->c[0].layer);
+    CHECK(backup->c[0].f[0].uvRotation==.625&&backup->c[0].f[0].v[0].light==.25);
+    /* The terminated maximum-length strings are already valid wire data;
+       encoding and decoding them again must preserve every byte. */
+    edCopyModel(m,backup);wire=edWireEncode(m,&size);CHECK(wire&&edWireDecode(backup,wire,size));
+    uint32_t againSize=0;unsigned char *again=edWireEncode(backup,&againSize);CHECK(again&&againSize==size&&!memcmp(wire,again,size));edFree(again);edFree(wire);
+    edDefault(m);edDefault(backup);puts("PASS: every fixed-width wire string and intro row terminates without changing adjacent fields");
+}
 static void dynamicStorageTests(void){
     edDefault(m);CHECK(sizeof(EdModel)<1024*1024&&m->c.size()==1&&m->c[0].f.size()==6);
     EdCell room=m->c[0];m->count=1536;
@@ -372,6 +429,33 @@ static void cogTests(void){
     CHECK(edCleaveSector(m,0,0,edV(0,-1,0),edV(0,1,0)));p=&m->cogs[0].params[0];CHECK(p->cell>=0&&p->face>=0&&edDot(before,edNormal(&m->c[p->cell].f[p->face]))>.99999);edDefault(m);
     m->cogCount=1;CHECK(edCogParseScript(&m->cogs[0],"test.cog",script));CHECK(edCogSetValue(m,&m->cogs[0].params[0],"4"));CHECK(edCreateStairs(m,EdHit{0,4,-1,-1},EdHit{0,2,-1,-1},4));p=&m->cogs[0].params[0];CHECK(p->cell>=0&&p->face>=0&&edDot(before,edNormal(&m->c[p->cell].f[p->face]))>.99999);
     EdPlacedCog check;CHECK(edCogParseScript(&check,"test.cog","symbols\nflex value=1 desc=\"local\"\nend\n"));CHECK(check.count==1);edDefault(m);
+}
+static void cogParsingRegressionTests(void){
+    EdPlacedCog parsed={0};
+    CHECK(edCogParseScript(&parsed,"header.cog","a_header_identifier_that_exceeds_thirty_one_characters\nflags=0x240\nsymbols\nint value=7\nend\n"));
+    CHECK(parsed.count==1&&!strcmp(parsed.params[0].name,"value")&&!strcmp(parsed.params[0].value,"7"));
+    EdPlacedCog original=parsed;
+    CHECK(!edCogParseScript(&parsed,"header.cog","symbols\na_declaration_type_that_exceeds_thirty_one_characters value=7\nend\n"));
+    CHECK(!memcmp(&parsed,&original,sizeof(parsed)));
+    CHECK(!edCogParseScript(&parsed,"header.cog","a_header_identifier_that_exceeds_thirty_one_characters\n"));
+    CHECK(!memcmp(&parsed,&original,sizeof(parsed)));
+    edDefault(m);EdCogParam param={0};param.type=ED_COG_VECTOR;param.cell=param.face=-1;
+    const char *valid[]={"(1/2/3)"," ( -1.25 / 2.5 / 3e2 ) \t","(0/0/0)"};
+    const char *expected[]={"(1/2/3)","(-1.25/2.5/300)","(0/0/0)"};
+    for(int i=0;i<3;i++){CHECK(edCogSetValue(m,&param,valid[i]));CHECK(!strcmp(param.value,expected[i]));}
+    const char *invalid[]={"(1/2/3","(1/2/3 ","1/2/3)","(1/2/3]","(1/2/3)junk","(1/2/3)  x","(1/2)","(1/2/3/4)","(nan/2/3)","(1/inf/3)","(1/2/-inf)","(1e999/2/3)"};
+    for(size_t i=0;i<sizeof(invalid)/sizeof(invalid[0]);i++){EdCogParam before=param;CHECK(!edCogSetValue(m,&param,invalid[i]));CHECK(!memcmp(&param,&before,sizeof(param)));}
+    puts("PASS: COG headers tolerate long metadata; vector values require finite complete syntax");
+}
+static void sectorRadiusRegressionTests(void){
+    /* A translated 2 by 4 by 4 room has center (5,-7,9) and radius 3. */
+    edDefault(m);for(int f=0;f<m->c[0].count;f++)for(int v=0;v<m->c[0].f[f].count;v++){
+        EdVec *p=&m->c[0].f[f].v[v].p;p->x+=5;p->y=p->y*2-7;p->z=p->z*4+7;}
+    m->spawn=m->spawns[0].position=edV(5,-7,9);CHECK(edWriteGob(m,"test-sector-radius.gob","Radius",0,"SECTION: HEADER\n"));
+    FILE *f=fopen("test-sector-radius.gob","rb");CHECK(f);char text[20000];size_t size=fread(text,1,sizeof(text)-1,f);CHECK(!ferror(f)&&feof(f));text[size]=0;fclose(f);remove("test-sector-radius.gob");
+    const char *center=strstr(text+12,"\nCenter ");CHECK(center);double x,y,z,radius;
+    CHECK(sscanf(center,"\nCenter %lf %lf %lf\nRadius %lf",&x,&y,&z,&radius)==4);CHECK(x==5&&y==-7&&z==9&&radius==3);
+    edDefault(m);puts("PASS: JKL export writes the known bounding-sphere center and radius");
 }
 static void episodeTests(void){
     edDefault(m);edEpisodeDefault(&m->episode,"Episode Test",0);EdEpisode *e=&m->episode;
@@ -823,7 +907,9 @@ int main(int argc,char **argv) {
     edResetDoubleTap(&tap,0);CHECK(!edDoubleTap(&tap,1,UINT32_MAX-100,350));CHECK(!edDoubleTap(&tap,0,UINT32_MAX-50,350));CHECK(edDoubleTap(&tap,1,50,350));
     m=(EdModel*)edAlloc(sizeof(EdModel));backup=(EdModel*)edAlloc(sizeof(EdModel));CHECK(m&&backup);
     if(argc>1&&!strcmp(argv[1],"--storage-only")){dynamicStorageTests();edFree(m);edFree(backup);return 0;}
+    if(argc>1&&!strcmp(argv[1],"--io-regressions-only")){cogParsingRegressionTests();sectorRadiusRegressionTests();wireTextTests();edFree(m);edFree(backup);return 0;}
     edDefault(m);if(!(argc>3&&(!strcmp(argv[3],"--fixture-only")||!strcmp(argv[3],"--large-fixture")))){
+    cogParsingRegressionTests();sectorRadiusRegressionTests();wireTextTests();
     stockMetadataTests();
     savedCleanupTests();
     savedPlacementTests();

@@ -6,10 +6,11 @@ static void freeEditorText(void){
     if(editorTextAtlas)stdDisplay_VBufferFree(editorTextAtlas);
     editorTextAtlas=editorTextSource=NULL;
 }
-static uint32_t editorDrawText(tVBuffer *buffer,stdFont *font,unsigned int x,int y,int width,char *text,int alpha){
+// Added: accept immutable text and cast only at the legacy drawing API
+static uint32_t editorDrawText(tVBuffer *buffer,stdFont *font,unsigned int x,int y,int width,const char *text,int alpha){
     if(!buffer||!font||!font->pBitmap||!font->pBitmap->mipSurfaces)return 0;
     tVBuffer *source=font->pBitmap->mipSurfaces[0];
-    if(!source||source->format.format.bpp!=8)return stdFont_DrawAscii(buffer,font,x,y,width,text,alpha);
+    if(!source||source->format.format.bpp!=8)return stdFont_DrawAscii(buffer,font,x,y,width,(char*)text,alpha);
     /* Interpret glyph shading using 01narsh.cmp, then give editor text a
        readable warm-white tint rather than the menu's dark inactive tint. */
     int cmp=addColormap("01narsh.cmp");rdColor24 *colors=colormapColors(cmp);
@@ -44,5 +45,5 @@ static uint32_t editorDrawText(tVBuffer *buffer,stdFont *font,unsigned int x,int
     }
     stdBitmap bitmap=*font->pBitmap;bitmap.mipSurfaces=&editorTextAtlas;bitmap.numMips=1;bitmap.colorkey=0;bitmap.palette=stdDisplay_masterPalette;
     stdFont mapped=*font;mapped.pBitmap=&bitmap;
-    return stdFont_DrawAscii(buffer,&mapped,x,y,width,text,alpha);
+    return stdFont_DrawAscii(buffer,&mapped,x,y,width,(char*)text,alpha);
 }

@@ -281,7 +281,9 @@ int stdDisplay_VBufferLock(tVBuffer *buf)
 {
     if (!buf) return 0;
 
-    SDL_LockSurface(buf->sdlSurface);
+    // Added: propagate SDL3 lock failures without exposing stale pixels.
+    buf->surface_lock_alloc = NULL;
+    if (!buf->sdlSurface || !SDL_LockSurface(buf->sdlSurface)) return 0;
     buf->surface_lock_alloc = (char*)buf->sdlSurface->pixels;
     return 1;
 }
@@ -291,7 +293,7 @@ void stdDisplay_VBufferUnlock(tVBuffer *buf)
     if (!buf) return;
     
     buf->surface_lock_alloc = NULL;
-    SDL_UnlockSurface(buf->sdlSurface);
+    if (buf->sdlSurface) SDL_UnlockSurface(buf->sdlSurface); // Added: tolerate a missing surface.
 }
 
 int stdDisplay_VBufferCopy(tVBuffer *vbuf, tVBuffer *vbuf2, unsigned int blit_x, int blit_y, rdRect *rect, int alpha_maybe)
