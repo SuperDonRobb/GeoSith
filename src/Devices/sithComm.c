@@ -202,7 +202,10 @@ int sithComm_SendMsgToPlayer(SithMessage *pMessage, int idTo, int outstream, int
             }
             ++sithComm_idk2;
             v20 = pMessage->netMsg.field_14;
-            _memcpy(&sithComm_MsgTmpBuf[idx_], pMessage, sizeof(SithMessage));
+            /* idx is the free slot (or the chosen eviction slot). idx_ only
+               tracks the oldest entry; using it here overwrote slot zero on
+               every send and lost the other messages' retry state. */
+            _memcpy(&sithComm_MsgTmpBuf[idx], pMessage, sizeof(SithMessage));
             if ( !v20 )
 LABEL_35:
                 pMessage->netMsg.msgId = 0;

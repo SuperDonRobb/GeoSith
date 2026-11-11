@@ -118,7 +118,9 @@ The result uses visible stair wedges and an invisible **Floor + Impassable** ram
 | Control | Action |
 | --- | --- |
 | Middle mouse | Open the searchable material browser |
-| Wheel | Cycle materials |
+| Wheel | Switch texture, decal, and texture-paint modes |
+| Shift + wheel | Cycle materials |
+| Ctrl + wheel | Adjust decal size or paint brush size |
 | Fire 1 on a surface | Apply the current material, including visible adjoins |
 | Hold Fire 2 on a surface | Move its UVs by moving or turning |
 
@@ -374,9 +376,9 @@ The smoke test covers live edits and save/reload. The render stress test exercis
 ### Terrain — weapon 7
 
 - Select surfaces with weapon 1, then click with weapon 7 to create terrain. Surfaces can meet at different angles and span sectors.
-- Fire1 raises terrain; Shift + Fire1 lowers it; Ctrl + Fire1 smooths neighboring vertices. The wheel changes brush radius.
+- Fire1 raises terrain; Shift + Fire1 lowers it; Ctrl + Fire1 smooths neighboring vertices. Shift + wheel changes brush radius; Ctrl + wheel changes brush intensity. Fire2 grabs terrain with brush falloff.
 - Each sector gets a separate model and thing, while shared seams sculpt together. Creating terrain leaves the original sector geometry unchanged.
-- Middle mouse opens texture and conversion options. Delete removes the terrain group. These operations support undo.
+- The wheel switches sculpt and texture-paint modes. In texture mode, Fire1 paints texture slot 1 and Fire2 paints slot 2 with falloff. Middle mouse opens texture slots, intensity, and conversion options. Delete removes the terrain group. These operations support undo.
 - Save Level preserves editable terrain metadata and includes playable walkstructs with dirt footsteps.
 
 ### Selection and map editing
@@ -395,4 +397,20 @@ The smoke test covers live edits and save/reload. The render stress test exercis
 - Weapon 2: Shift + Fire2 rotates UVs; hover an edge while rotating to align. Ctrl + Fire2 pans at half the usual texture grid size.
 - Saber idle hum is muted while editing. Remote-player sound identity synchronization fixes incorrect weapon sounds.
 
-Use the same release on all multiplayer peers (editor protocol 17).
+Use the same release on all multiplayer peers (editor protocol 22).
+
+### Painting and multiplayer sessions
+
+- Weapon 2 decal mode previews the selected texture; Fire1 bakes it onto the surface. Texture-paint mode uses a round falloff brush. Selected surfaces restrict painting to those faces.
+- Baked surface and terrain textures save as 16-bit MAT resources. Applying a regular material restores ordinary surface tiling.
+- Multiplayer terrain sculpting/painting and surface texture painting lock the edited target to one player. The owner sees a red border; other editors see a red tint and cannot edit it.
+- Press Escape, switch weapons, or start editing another target to finish. Surface painting also finishes when changing texture mode. The completed session is sent once and becomes one shared undo step.
+- Join snapshots are compressed. Custom materials, painted textures, models, and COG resources synchronize with the level.
+- Clients joining while the host is editing can look up and down immediately; entering gameplay first is no longer necessary.
+
+### Spline previews and sector groups
+
+- Endpoint and interior handles orient the corridor in three dimensions. Drag a point while placing it to set its handles. Fire2 on the curve moves the whole spline.
+- Invalid spline geometry appears red in the map and stays out of the 3D world. Adjust its points to make it valid; cancelling a spline with only one point removes it.
+- Moving an editable spline restores its previous intersections instead of leaving cuts in surrounding sectors. Escape cancels active drawing/cleaving before opening the pause menu.
+- In map view, select sectors and press Enter to create a named group. Add an array along an axis, set the copy count, or delete the group. Choose a group in the spline menu to bend repeated copies along the curve using their original textures.

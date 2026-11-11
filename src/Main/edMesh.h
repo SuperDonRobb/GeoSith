@@ -29,7 +29,7 @@ static int meshFaceValid(const EdFace *f){
     }return 1;
 }
 int edMeshValidate(const EdModel *m){
-    if(!edTemplatesValidate(m))return 0;
+    if(!edTemplatesValidate(m)||!edPaintValid(m)||!edDecalsValid(m))return 0;
     if(m->assetCount<0||m->assetCount>ED_ASSETS||m->meshCount<0||m->meshCount>ED_MESHES)return 0;
     for(int a=0;a<m->assetCount;a++){
         const EdAsset *asset=&m->assets[a];if(asset->terrainGroup<0)return 0;if((asset->saved!=0&&asset->saved!=1)||(asset->terrain!=0&&asset->terrain!=1))return 0;if(asset->terrain&&(!asset->saved||!isfinite(length(asset->terrainNormal))||fabs(length(asset->terrainNormal)-1)>.0001))return 0;if(!memchr(asset->name,0,32)||!asset->name[0]||strlen(asset->name)>27||length(asset->origin)>1e6||!isfinite(length(asset->origin)))return 0;

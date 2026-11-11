@@ -1441,8 +1441,17 @@ void sithMulti_Update(int msecDeltaTime)
                                 jkPlayer_playerInfos[sithMulti_curWelcomePlayerNum].teamNum = (sithMulti_curWelcomePlayerNum & 1) + 1;
                             sithMulti_verbosePrintf("Last sync %x %x\n", sithMulti_newPlayerId, sithMulti_curWelcomePlayerNum);
                             jkPlayer_playerInfos[sithMulti_curWelcomePlayerNum].playerNetId = sithMulti_newPlayerId;
-                            sithMulti_SyncPlayers(sithMulti_newPlayerId, 1);
+                            /* Editor hosts reject client-authored player rosters.
+                               Complete admission here instead of relying on a
+                               later client roster to mark the slot active. An
+                               inactive slot is excluded from every broadcast
+                               (skins, movement, and gameplay messages). */
+                            if (jkEditor_IsLevel())
+                                sithPlayer_ShowPlayer(sithMulti_curWelcomePlayerNum, sithMulti_newPlayerId);
+                            sithMulti_SyncPlayers(jkEditor_IsLevel() ? -1 : sithMulti_newPlayerId, 1);
                             sithMulti_SendWelcome(sithMulti_newPlayerId, sithMulti_curWelcomePlayerNum, sithMulti_newPlayerId);
+                            if (jkEditor_IsLevel())
+                                sithMulti_ProcessPlayerJoin(sithMulti_curWelcomePlayerNum);
 
                             sithNet_bNeedsFullThingSyncForLeaveJoin = 0;
                             sithMulti_newPlayerId = 0;

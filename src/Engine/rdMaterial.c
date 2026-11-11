@@ -324,8 +324,8 @@ int rdMaterial_LoadEntry_Common(char *mat_fpath, rdMaterial *material, int creat
         texture->color_transparent = tex_header_1.unk_10;
         format.width = tex_header_1.width;
         format.height = tex_header_1.height;
-        format.format.is16bit = material->texFormat.is16bit;
-        format.format.bpp = material->texFormat.bpp;
+        // CPU consumers (editor painting/preview) need the channel masks too.
+        format.format = material->texFormat;
         if ( texture->num_mipmaps )
           break;
 
@@ -690,7 +690,7 @@ void rdMaterial_FreeEntry(rdMaterial* pMaterial)
                     rdDDrawSurface* surface = &pTex->alphaMats[j];
 
 #if defined(SDL2_RENDER) || defined(TARGET_RETRO_HOMEBREW)
-                    if (surface->texture_loaded) {
+                    if (surface->texture_loaded || pTex->opaqueMats[j].texture_loaded) {
                         stdPlatform_Printf("OpenJKDF2: rdMaterial_FreeEntry %s %x\n", pMaterial->mat_fpath, surface->texture_id);
                         std3D_PurgeSurfaceRefs(&pTex->alphaMats[j]);
                         std3D_PurgeSurfaceRefs(&pTex->opaqueMats[j]);
@@ -732,7 +732,7 @@ void rdMaterial_FreeEntry(rdMaterial* pMaterial)
             rdDDrawSurface* surface = &pTex->alphaMats[j];
 
 #if defined(SDL2_RENDER) || defined(TARGET_RETRO_HOMEBREW)
-            if (surface->texture_loaded) {
+            if (surface->texture_loaded || pTex->opaqueMats[j].texture_loaded) {
                 stdPlatform_Printf("OpenJKDF2: rdMaterial_FreeEntry %s %x\n", pMaterial->mat_fpath, surface->texture_id);
                 std3D_PurgeSurfaceRefs(&pTex->alphaMats[j]);
                 std3D_PurgeSurfaceRefs(&pTex->opaqueMats[j]);

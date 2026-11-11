@@ -34,6 +34,7 @@
 #define rdClearPostStatistics_ADDR (0x0043AC10)
 
 extern int rdroid_curVertexColorMode;
+extern int rdroid_editorTerrainRed;
 
 #ifdef RDRASTER_SOFTWARE_RENDERER
 // Runtime software-renderer toggle (cvar "r_softwareRenderer"): 0 = hardware (GL), non-0 = software.

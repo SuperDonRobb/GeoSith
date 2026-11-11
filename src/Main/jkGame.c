@@ -360,7 +360,7 @@ int jkGame_Update()
 #endif
 
     // MOTS added: scope/security cam overlays
-    if (!jkEditor_MapActive()) {
+    if (!jkEditor_Active()) {
     if (!Main_bMotsCompat) {
         if ( (playerThings[playerThingIdx].actorThing->actorParams.flags & SITH_AF_NOIDLECAMERA) == 0 ) {
             jkHud_Draw();
@@ -386,7 +386,7 @@ int jkGame_Update()
     jkEditor_Draw();
     if (!jkEditor_MapActive()) {
         jkDev_BlitLogToScreen();
-        jkHudInv_Draw();
+        if (!jkEditor_Active()) jkHudInv_Draw();
     }
 #if !defined(SDL2_RENDER) && !defined(TARGET_RETRO_HOMEBREW)
     if ( Video_modeStruct.b3DAccel )

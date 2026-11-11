@@ -41,7 +41,7 @@ static int edMapTranslate(EdModel *out,const EdModel *source,const EdBuffer<unsi
     if(!count||(copy&&count>ED_CELLS-source->count)||!isfinite(delta.x)||!isfinite(delta.y)||!isfinite(delta.z))return 0;
     edCopyModel(out,source);
     for(int s=0;s<source->count;s++)if(selected[s]){
-        int target=copy?out->count++:s;out->c[target]=source->c[s];
+        int target=copy?out->count++:s;out->c[target]=source->c[s];if(copy)out->c[target].arrayId=0;
         for(int f=0;f<out->c[target].count;f++)for(int v=0;v<out->c[target].f[f].count;v++)out->c[target].f[f].v[v].p=edAdd(out->c[target].f[f].v[v].p,delta);
     }
     if(!copy){
@@ -65,7 +65,7 @@ static int edMapPaste(EdModel *out,const EdModel *source,const EdModel *clip,EdV
     edMapPlacementFailure="Invalid placement coordinates.";if(!isfinite(delta.x)||!isfinite(delta.y)||!isfinite(delta.z))return 0;
     edCopyModel(out,source);
     for(int s=0;s<clip->count;s++){
-        EdCell *cell=&out->c[out->count++];*cell=clip->c[s];
+        EdCell *cell=&out->c[out->count++];*cell=clip->c[s];cell->arrayId=0;
         for(int f=0;f<cell->count;f++)for(int v=0;v<cell->f[f].count;v++)cell->f[f].v[v].p=edAdd(cell->f[f].v[v].p,delta);
     }
     for(int s=0;s<out->count;s++)for(int f=0;f<out->c[s].count;f++){EdFace *face=&out->c[s].f[f];face->attributes=edSurfaceAttributes(face);face->hasAttributes=1;face->neighbor=face->mirror=-1;}

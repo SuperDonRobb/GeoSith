@@ -1,6 +1,7 @@
 #ifndef ED_GEOMETRY_H
 #define ED_GEOMETRY_H
 #include "edStorage.h"
+#include <memory>
 /* Editor geometry is independent of renderer pointers. All normals point inward.
  * Geometry grows with the document; failed transactions never replace it. */
 /* Working storage may exceed the JK format limit during clipping. Only
@@ -22,8 +23,8 @@
 #define ED_EPISODE_ROWS 64
 #define ED_COGS (32768-512) /* 15-bit instance IDs, including class-script reserve */
 #define ED_COG_PARAMS 128
-#define ED_ASSETS 8
-#define ED_MESHES 16
+#define ED_ASSETS INT_MAX
+#define ED_MESHES INT_MAX
 #define ED_CUSTOM_TEMPLATES 64
 #define ED_TEMPLATE_PARAMS 80
 typedef struct {char key[32],value[128];} EdTemplateParam;
@@ -36,10 +37,16 @@ typedef struct {
     int geometryMode,textureMode,lightingMode,portal;
     double uScale,vScale,extraLight,adjoinDistance;
 } EdSurfaceAttributes;
-typedef struct { int count,material,neighbor,mirror; double uOffset,vOffset; EdVertex v[ED_VERTS]; int hasAttributes;EdSurfaceAttributes attributes; double uvRotation; int customUV; } EdFace;
-typedef struct { int count; EdBuffer<EdFace> f; double ambientLight,extraLight; unsigned int flags; EdVec tint,thrust; char sound[32]; double soundVolume,tolerance; char colormap[128],layer[64]; int splineId; } EdCell;
-typedef struct {char name[32];EdVec origin;int saved,terrain;EdVec terrainNormal;int terrainGroup;} EdAsset;
-typedef struct {int asset;EdCell geometry;EdBuffer<unsigned char> terrainPinned;EdBuffer<EdVec> terrainNormals;} EdMesh;
+typedef struct { int count,material,neighbor,mirror; double uOffset,vOffset; EdVertex v[ED_VERTS]; int hasAttributes;EdSurfaceAttributes attributes; double uvRotation; int customUV; int decalId; } EdFace;
+typedef struct { int count; EdBuffer<EdFace> f; double ambientLight,extraLight; unsigned int flags; EdVec tint,thrust; char sound[32]; double soundVolume,tolerance; char colormap[128],layer[64]; int splineId,arrayId; } EdCell;
+typedef struct {char name[32];EdVec origin;int saved,terrain;EdVec terrainNormal;int terrainGroup;char paintSlots[2][128];} EdAsset;
+#define ED_PAINT_LAYERS 64
+typedef struct {char material[128];EdBuffer<double> weights;} EdPaintLayer;
+typedef struct {int asset;EdCell geometry;EdBuffer<unsigned char> terrainPinned;EdBuffer<EdVec> terrainNormals;EdBuffer<EdPaintLayer> paint;} EdMesh;
+struct EdPaintImage {int width=0,height=0;std::vector<unsigned char> rgba;};
+struct EdPaintBake {int size=0;std::vector<unsigned char> mat;std::vector<EdVec> uv;std::vector<uint64_t> faceHashes;std::vector<unsigned char> faceAlpha;int updatedFaces=0;};
+extern int (*edPaintLoadImage)(const char*,EdPaintImage*);
+
 typedef struct {EdVec position,rotation;} EdFrame;
 typedef struct {int frameCount,hasFlags,pathOverride;unsigned int flags;EdFrame frames[ED_FRAMES];int aiFrames,hasVelocity;EdVec velocity;char aiClass[32];} EdThingAttributes;
 typedef struct { EdVec position,rotation; EdThingAttributes attributes;} EdSpawn;
@@ -59,9 +66,19 @@ typedef struct {
 #define ED_SPLINE_POINTS 128
 #define ED_SPLINE_SECTORS 256
 typedef struct {EdVec position,handle;} EdSplinePoint;
-typedef struct {int id,count,sides,segments,material,closed,mirrorAxes;double width,height;unsigned int geometryHash;EdBuffer<EdSplinePoint> points;} EdSpline;
-typedef struct { int count; EdVec spawn; int spawnCount; EdSpawn spawns[ED_SPAWNS]; EdLevelHeader header; int objectCount;EdBuffer<EdObject> objects;int lightCount;EdBuffer<EdLight> lights;EdEpisode episode;int cogCount;EdBuffer<EdPlacedCog> cogs;int assetCount,meshCount;EdBuffer<EdAsset> assets;EdBuffer<EdMesh> meshes;int templateCount;EdBuffer<EdTemplate> templates;EdBuffer<EdCell> c; int splineCount;EdBuffer<EdSpline> splines; } EdModel;
+typedef struct {int id,count,sides,segments,material,closed,mirrorAxes,groupId;double width,height;unsigned int geometryHash;EdBuffer<EdSplinePoint> points;int invalid,textureHeight;EdBuffer<EdCell> cutBefore,cutAfter,preview;} EdSpline;
+struct EdSectorGroup {char name[64]={};int count=0,direction=2,copies=0;EdBuffer<EdCell> cells;};
+struct EdDecalMaterial {char name[32]={};std::shared_ptr<const std::vector<unsigned char>> data;};
+typedef struct { int count; EdVec spawn; int spawnCount; EdSpawn spawns[ED_SPAWNS]; EdLevelHeader header; int objectCount;EdBuffer<EdObject> objects;int lightCount;EdBuffer<EdLight> lights;EdEpisode episode;int cogCount;EdBuffer<EdPlacedCog> cogs;int assetCount,meshCount;EdBuffer<EdAsset> assets;EdBuffer<EdMesh> meshes;int templateCount;EdBuffer<EdTemplate> templates;EdBuffer<EdCell> c; int splineCount;EdBuffer<EdSpline> splines;int decalCount;EdBuffer<EdDecalMaterial> decals;int groupCount;EdBuffer<EdSectorGroup> groups; } EdModel;
+int edGroupsValidate(const EdModel*);
+int edGroupCapture(EdModel*,const EdBuffer<unsigned char>&,const char*);
+int edGroupArray(EdModel*,const EdModel*,int,int,int);
+int edGroupDelete(EdModel*,int);
+int edReadGroupData(EdModel*,const unsigned char*,unsigned int);
+EdVec edGroupAxis(int);
+int edGroupBounds(const EdSectorGroup*,EdVec*,EdVec*);
 EdVec edSplinePosition(const EdSpline *s,double t);
+int edSplineUpdate(EdModel *out,const EdModel *source,const EdSpline *spline,int textureHeight=64);
 int edSplineRebuild(EdModel *out,const EdModel *source,const EdSpline *spline,int textureHeight=64);
 void edSplineReconcile(EdModel *m);
 int edSplineConvert(EdModel *m,int id);
@@ -80,7 +97,21 @@ inline int edCompare(const EdCell* a,const EdCell* b,size_t) {return !edCellsEqu
 typedef struct { int cell,face,vertex,edge; double distance; EdVec point; } EdHit;
 typedef struct { int count; EdHit hits[ED_SELECTIONS]; } EdSelection;
 int edTerrainCreate(EdModel *out,const EdModel *source,const EdSelection *surfaces,const char *name);
-int edTerrainSculpt(EdModel *m,int asset,EdVec center,double radius,double amount);
+int edTerrainPaint(EdModel*,int,EdVec,double,double,const char*,const char*(*)(int));
+int edPaintValid(const EdModel*);
+int edDecalsValid(const EdModel*);
+int edDecalOutline(const EdFace*,EdVec,double,double,EdFace*);
+int edPlaceDecal(EdModel*,EdFace*,EdVec,double,const EdPaintImage*,const EdPaintImage*,double paintStrength=0);
+int edDecalImage(const EdModel*,int,EdPaintImage*);
+void edCompactDecals(EdModel*);
+int edSurfacePaintOnlyChange(const EdModel*,const EdModel*);
+int edPaintOnlyChange(const EdModel*,const EdModel*);
+unsigned int edPaintHash(const EdModel*,int);
+int edPaintBakeAsset(const EdModel*,int,EdPaintBake*,int incremental=0);
+int edPainted(const EdModel*,int);
+void edPaintFilename(const EdModel*,int,char*);
+int edTerrainSculpt(EdModel *m,int asset,EdVec center,double radius,double amount,EdVec normal={});
+int edTerrainGrab(EdModel *out,const EdModel *source,int asset,EdVec center,double radius,EdVec delta);
 int edTerrainSmooth(EdModel *m,int asset,EdVec center,double radius,double strength);
 int edTerrainObject(const EdModel *m,int object);
 int edTemplatesValidate(const EdModel *m);
@@ -107,6 +138,7 @@ EdVec edSnapPoint(EdVec p);
 EdVec edSnapFacePoint(const EdFace *face,EdVec p);
 EdVec edSnapMeshFacePoint(const EdFace *face,EdVec p);
 void edMapFace(EdFace *face);
+int edStitchTexture(EdFace *target,const EdFace *source);
 void edShiftFaceUV(EdFace *face,EdVec movement);
 void edPanFaceTexture(EdFace *face,EdVec movement);
 void edPanFaceTextureGrid(EdFace *face,EdVec movement,double grid);

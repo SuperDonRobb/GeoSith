@@ -13,11 +13,11 @@ static void templateTestMenu(jkGuiMenu *menu){
 }
 static char customRegistered[EDITOR_TEMPLATES][64];
 static int customRegisteredCount;
-static unsigned int customRegisteredHashes[EDITOR_TEMPLATES];
+static unsigned int customRegisteredHashes[EDITOR_TEMPLATES],customDefinitionHashes[EDITOR_TEMPLATES];
 static SithWorld *customRegistryWorld;
-static char customModelNames[ED_ASSETS][32];
-static unsigned int customModelHashes[ED_ASSETS];
-static void resetCustomTemplates(void){customRegistryWorld=NULL;customRegisteredCount=0;edZero(customModelNames,0,sizeof(customModelNames));edZero(customModelHashes,0,sizeof(customModelHashes));edZero(customRegisteredHashes,0,sizeof(customRegisteredHashes));}
+static EdBuffer<std::array<char,32>> customModelNames;
+static EdBuffer<unsigned int> customModelHashes,customGeometryHashes;
+static void resetCustomTemplates(void){customRegistryWorld=NULL;customRegisteredCount=0;edZero(customModelNames,0,sizeof(customModelNames));edZero(customModelHashes,0,sizeof(customModelHashes));edZero(customGeometryHashes,0,sizeof(customGeometryHashes));edZero(customRegisteredHashes,0,sizeof(customRegisteredHashes));edZero(customDefinitionHashes,0,sizeof(customDefinitionHashes));}
 static int templateParameterOrder(const char *key){return !strcmp(key,"type")?0:!strcmp(key,"move")?1:!strcmp(key,"numframes")?2:3;}
 static int customTemplateLine(const EdTemplate *t,char *line,size_t size){
     int n=snprintf(line,size,"%s %s",t->name,t->parent);
@@ -25,7 +25,7 @@ static int customTemplateLine(const EdTemplate *t,char *line,size_t size){
     return n>0&&n<STDCONF_LINEBUFFER_LEN-2;
 }
 static unsigned int customAssetHash(const EdModel *source,int asset){
-    unsigned int hash=edNetHash(&source->assets[asset],sizeof(EdAsset));for(int i=0;i<source->meshCount;i++)if(source->meshes[i].asset==asset)hash=(hash^edCellHash(&source->meshes[i].geometry))*16777619u;return hash;
+    unsigned int hash=edNetHash(&source->assets[asset],sizeof(EdAsset))^edPaintHash(source,asset)^decalAssetHash(source,asset);for(int i=0;i<source->meshCount;i++)if(source->meshes[i].asset==asset)hash=(hash^edCellHash(&source->meshes[i].geometry))*16777619u;return hash;
 }
 static unsigned int customTemplateHash(const EdModel *source,const char *name){
     unsigned int hash=0;int index=edTemplateIndex(source,name),depth=0;while(index>=0&&depth++<ED_CUSTOM_TEMPLATES){const EdTemplate *t=&source->templates[index];hash=(hash^edNetHash(t,offsetof(EdTemplate,params)+t->count*sizeof(EdTemplateParam)))*16777619u;for(int p=0;p<t->count;p++)if(!strcmp(t->params[p].key,"model3d"))for(int a=0;a<source->assetCount;a++){char file[64];snprintf(file,64,"%s.3do",source->assets[a].name);if(!__strcmpi(file,t->params[p].value))hash=(hash^customAssetHash(source,a))*16777619u;}
@@ -46,9 +46,15 @@ static int syncCustomTemplates(const EdModel *source){
                     if(!__strcmpi(file,name)&&!source->assets[a].saved)return 0;
                     if(!__strcmpi(file,name)){
                         unsigned int modelHash=customAssetHash(source,a);
-                        if(strcmp(customModelNames[a],name)||customModelHashes[a]!=modelHash||!sithModel_Find(file)){
-                            if(!builderCacheFrom(source,a))return 0;rdThing_FreeEntry(&builderThings[a]);if(!sithModel_ReplaceEditor(file,&builderModels[a]))return 0;builderHashes[a]=0;
-                            snprintf(customModelNames[a],32,"%s",name);customModelHashes[a]=modelHash;
+                        if(strcmp(customModelNames[a].data(),name)||customModelHashes[a]!=modelHash||!sithModel_Find(file)){
+                            unsigned int geometryHash=decalAssetHash(source,a)^edNetHash(&source->assets[a],sizeof(EdAsset))^(edPainted(source,a)?0x714bc21u:0);for(int mesh=0;mesh<source->meshCount;mesh++)if(source->meshes[mesh].asset==a)geometryHash=(geometryHash^edCellHash(&source->meshes[mesh].geometry))*16777619u;
+                            if(edPainted(source,a)&&!strcmp(customModelNames[a].data(),name)&&customGeometryHashes[a]==geometryHash&&sithModel_Find(file)){
+                                EdPaintBake bake;if(!terrainBakeLive(source,a,&bake))return 0;
+                            }else{
+                                if(!builderCacheFrom(source,a))return 0;rdThing_FreeEntry(&builderThings[a]);if(!sithModel_ReplaceEditor(file,&builderModels[a]))return 0;builderHashes[a]=0;
+                            }
+                            customGeometryHashes[a]=geometryHash;
+                            snprintf(customModelNames[a].data(),32,"%s",name);customModelHashes[a]=modelHash;
                         }
                     }}
                 if(!sithModel_Load(file,1))return 0;
@@ -56,7 +62,9 @@ static int syncCustomTemplates(const EdModel *source){
             char line[16384];if(!customTemplateLine(t,line,sizeof(line)))return 0;
             StdConffileEntry old=stdConffile_g_entry;stdConffile_ReadArgsFromStr(line);definition=sithTemplate_UpdateEditor(world);stdConffile_g_entry=old;if(!definition)return 0;
             if(registry==customRegisteredCount){if(customRegisteredCount==EDITOR_TEMPLATES)return 0;snprintf(customRegistered[customRegisteredCount++],64,"%s",t->name);}
-            customRegisteredHashes[registry]=hash;changed=1;
+            unsigned int definitionHash=edNetHash(t,offsetof(EdTemplate,params)+t->count*sizeof(EdTemplateParam));
+            if(customDefinitionHashes[registry]!=definitionHash)changed=1;
+            customDefinitionHashes[registry]=definitionHash;customRegisteredHashes[registry]=hash;clearObjectPreviews();
         }
         int known=0;for(int j=0;j<templateCount;j++)if(!strcmp(templateNames[j],t->name))known=1;
         if(!known&&templateCount<EDITOR_TEMPLATES){snprintf(templateNames[templateCount++],128,"%s",t->name);changed=1;}done[i]=1;

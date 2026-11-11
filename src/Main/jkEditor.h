@@ -32,4 +32,6 @@ void jkEditor_SelfTest(void);
 int jkEditor_ResourceCapacity(SithWorld *world,int requested,int minimum);
 int jkEditor_HandleEscape(void);
 int jkEditor_ModelBlue(void);
+int jkEditor_TerrainLockedThing(const SithThing *thing);
+int jkEditor_SurfaceLocked(const SithSurface *surface);
 #endif

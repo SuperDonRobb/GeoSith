@@ -55,13 +55,15 @@ Spline corridors (overhead map)
 - Click a point to show its paired handles. Drag the point or either handle
   with the left mouse button. Enter on a point opens its X/Y/Z coordinates;
   Z is the corridor center height. In 3D, weapon 1 can select and grab points.
-- Point and handle drags regenerate the corridor on release. Invalid geometry
-  is rejected without changing the level. Ctrl+Z/Ctrl+Y undo and redo edits.
+- Point and handle drags regenerate the corridor on release. Invalid splines
+  remain editable as red map previews, without merging or appearing in 3D.
+  Fix the controls to regenerate valid geometry. Select the curve and hold
+  Fire 2 to move the entire spline. Ctrl+Z/Ctrl+Y undo and redo edits.
 - Splines are saved with the level and synchronized in multiplayer. Intersections
   and mirrored connections keep spline controls. Use Convert to Sectors in the
   spline shape menu before cleaving, extruding or moving its generated geometry.
   Conversion is one undo step; undo restores the controls.
-- Multiplayer participants must use this updated build (editor protocol 16).
+- Multiplayer participants must use this updated build (editor protocol 22).
 
 Spline tunnel textures follow the corridor length and wrap around its cross-section.
 The perimeter is stretched to a whole number of texture repeats for a closed seam.
@@ -83,15 +85,20 @@ Terrain tool (weapon 7)
   surfaces, select them with weapon 1 first. Connected surfaces may span sectors
   and meet at different angles.
 - Aim at terrain to see the circular brush. Hold Fire 1 to raise it along the
-  original surface normal, blending directions at angled seams; Shift + Fire 1
-  lowers it. Ctrl + Fire 1 smooths by averaging connected vertices under the
-  brush, keeping shared seams together. Wheel changes brush radius.
+  current terrain surface normal; Shift + Fire 1
+  lowers it. Ctrl + Fire 1 strongly smooths connected vertices in all directions,
+  keeping shared seams together. Hold Fire 2 to grab a patch with brush falloff
+  and move it freely. Shift + wheel changes brush radius. Ctrl + wheel changes
+  sculpt/smooth intensity (1-100%, default 25%); middle mouse also offers a
+  numeric intensity setting. Terrain uses a shared tiled UV map, recalculated
+  after edits to reduce stretching and keep linked seams aligned.
 - Middle mouse opens texture selection and conversion options. Texture changes
   apply to the whole terrain. Convert to 3DO keeps a model in the custom library;
   convert to walkstruct keeps an ordinary placed object in the level.
 - Terrain edges can be raised and lowered with the brush. Delete while pointing
   at terrain removes it, its generated template and custom model (Ctrl+Z restores
-  it). Terrain walkstructs use dirt footsteps. Creating terrain leaves all sector surfaces and vertices unchanged.
+  it). Terrain walkstructs use dirt footsteps. Creating terrain leaves all sector surfaces and vertices unchanged. New terrain
+  faces sit slightly above the supporting surfaces to avoid overlapping them.
   Selected surfaces may meet at different angles or span sectors. Each sector
   gets its own terrain model and thing; shared edges sculpt together. Texture,
   conversion and deletion apply to the linked terrain group.
@@ -120,3 +127,9 @@ Weapon 1 / Select: Shift + mouse wheel scales selected surfaces or sectors
 about their combined center (wheel up: 10% larger; down: inverse step).
 Shared vertices move together. Nonplanar or non-convex results are rejected;
 editable splines must first be converted to sectors. Ctrl+Z undoes scaling.
+
+Surface texture painting in multiplayer (weapon 2): the first brush stroke locks
+the surface to you. You see a red border; other editors see a red tint and cannot
+change its texture. Strokes stay local until you press Escape, change weapons or
+texture mode, or begin painting another surface. The completed painting is sent
+once and becomes one shared undo step.

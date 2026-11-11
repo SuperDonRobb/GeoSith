@@ -4,8 +4,10 @@
 #include "edMap.h"
 #include "edMirror.h"
 #include "edWire.h"
+#include "edTerrainSession.h"
 #include "General/stdNetReader.h"
 #include <stdio.h>
+#include <chrono>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
@@ -680,20 +682,141 @@ static void mirrorTests(void){
     uint32_t n;unsigned char *wire=edWireEncode(&result,&n);CHECK(wire&&edWireDecode(&changed,wire,n)&&edModelsEqual(&changed,&result));edFree(wire);
     puts("PASS: map mirror combinations, movement, deletion, cleaves, self-symmetry and wire round trip");
 }
+static const char *paintTestName(int){return "red.mat";}
+static int paintTestImage(const char *name,EdPaintImage *image){
+    image->width=image->height=1;image->rgba={0,0,0,255};
+    image->rgba[!strcmp(name,"red.mat")?0:!strcmp(name,"green.mat")?1:2]=255;return 1;
+}
+static void surfaceSessionTests(){
+    auto base=std::make_unique<EdModel>(),local=std::make_unique<EdModel>(),remote=std::make_unique<EdModel>();edDefault(base.get());*local=*remote=*base;
+    EdPaintImage red,green;paintTestImage("red.mat",&red);paintTestImage("green.mat",&green);
+    auto key=edSurfaceKey(base->c[0].f[0]),other=edSurfaceKey(base->c[0].f[1]);
+    CHECK(edPlaceDecal(local.get(),&local->c[0].f[0],edV(0,0,0),1,&red,&green,.5));
+    EdVec center={};for(int v=0;v<4;v++)center=edAdd(center,remote->c[0].f[1].v[v].p);center=edScale(center,.25);
+    CHECK(edPlaceDecal(remote.get(),&remote->c[0].f[1],center,1,&green,&red,.4));
+    auto concurrent=std::make_unique<EdModel>(*remote);
+    CHECK(!edTerrainSame(base.get(),local.get(),key)&&edTerrainSame(base.get(),remote.get(),key));
+    CHECK(edTerrainOverlay(remote.get(),local.get(),key)&&edValidate(remote.get()));
+    CHECK(edTerrainSame(remote.get(),local.get(),key)&&edTerrainSame(remote.get(),concurrent.get(),other)&&remote->decalCount==2);
+    CHECK(edTerrainOverlay(remote.get(),base.get(),key)&&edModelsEqual(remote.get(),concurrent.get()));
+    local->c[0].f[0].v[0].p.x+=.01;CHECK(!edTerrainOverlay(remote.get(),local.get(),key)&&edModelsEqual(remote.get(),concurrent.get()));
+    puts("PASS: surface paint sessions preserve concurrent textures, normalize material IDs, hide previews and reject changed geometry");
+}
+static void decalTests(void){
+    EdModel m;edDefault(&m);EdPaintImage red,green,image;paintTestImage("red.mat",&red);paintTestImage("green.mat",&green);
+    EdFace &face=m.c[0].f[0];EdVec center=edV(0,0,0);EdFace outline;
+    CHECK(edDecalOutline(&face,center,.5,1,&outline)&&outline.count==4);
+    CHECK(edPlaceDecal(&m,&face,center,.5,&red,&green)&&edValidate(&m)&&m.decalCount==1);
+    CHECK(edDecalImage(&m,face.decalId,&image));int w=image.width,h=image.height;
+    CHECK(image.rgba[((h/2)*w+w/2)*4+1]>240&&image.rgba[0]>240);
+    EdModel before=m;auto saved=m.decals[0].data;auto bytes=*saved;
+    CHECK(edPlaceDecal(&m,&m.c[0].f[0],edV(.75,0,0),.5,&image,&green)&&m.decalCount==1);
+    CHECK(*before.decals[0].data==bytes&&before.decals[0].data==saved&&!edModelsEqual(&before,&m));
+    CHECK(edDecalOutline(&face,edV(1,0,0),.5,1,&outline));for(int i=0;i<outline.count;i++)CHECK(outline.v[i].p.x<=1.000001);
+    unsigned size;unsigned char *wire=edWireEncode(&m,&size);EdModel decoded;CHECK(wire&&edWireDecode(&decoded,wire,size)&&edModelsEqual(&m,&decoded));edFree(wire);
+    auto bad=std::make_shared<std::vector<unsigned char>>(*decoded.decals[0].data);(*bad)[100]=1;decoded.decals[0].data=bad;CHECK(!edValidate(&decoded));
+    EdModel transparent;edDefault(&transparent);green.rgba[3]=0;CHECK(!edPlaceDecal(&transparent,&transparent.c[0].f[0],center,.5,&red,&green));
+    green.rgba[3]=128;CHECK(edPlaceDecal(&transparent,&transparent.c[0].f[0],center,.5,&red,&green));CHECK(edDecalImage(&transparent,1,&image));size_t pixel=((image.height/2)*image.width+image.width/2)*4;CHECK(image.rgba[pixel]>115&&image.rgba[pixel]<140&&image.rgba[pixel+1]>115&&image.rgba[pixel+1]<140);
+    char resources[512];snprintf(resources,sizeof(resources),"SECTION: MATERIALS\nWorld materials 2\n0: red.mat 1 1\n1: %s 1 1\nend\n",m.decals[0].name);m.c[0].f[0].material=1;
+    CHECK(edWriteGob(&m,"test-decal.gob","Decal",0,resources));FILE *file=fopen("test-decal.gob","rb");CHECK(file);fseek(file,0,SEEK_END);long length=ftell(file);rewind(file);std::vector<unsigned char> gob(length);CHECK(fread(gob.data(),1,length,file)==length);fclose(file);bool found=false;
+    unsigned dir=edNetLoad32(gob.data()+8),entries=edNetLoad32(gob.data()+dir);for(unsigned i=0;i<entries;i++){const unsigned char *entry=gob.data()+dir+4+i*136;if(strstr((const char*)entry+8,m.decals[0].name)){unsigned offset=edNetLoad32(entry),count=edNetLoad32(entry+4);CHECK(count==m.decals[0].data->size()&&!memcmp(gob.data()+offset,m.decals[0].data->data(),count));found=true;}}CHECK(found);remove("test-decal.gob");
+    m.c[0].f[0].decalId=0;edCompactDecals(&m);CHECK(m.decalCount==0);
+    puts("PASS: clipped decals, RGB565 compositing, immutable undo, network serialization and GOB assets");
+}
+static void surfacePaintTests(void){
+    EdModel m;edDefault(&m);EdModel before=m;EdPaintImage red,green,image;paintTestImage("red.mat",&red);paintTestImage("green.mat",&green);
+    CHECK(edPlaceDecal(&m,&m.c[0].f[0],edV(0,0,0),1,&red,&green,.5));CHECK(edValidate(&m)&&edSurfacePaintOnlyChange(&before,&m));
+    CHECK(edDecalImage(&m,1,&image));auto sample=[&](double x){int px=(int)(2.5+(x+1)/2*(image.width-5));return image.rgba[((image.height/2)*image.width+px)*4+1];};
+    CHECK(sample(0)>115&&sample(0)<140&&sample(.25)>sample(.4)&&sample(.4)>sample(.6)&&sample(.6)==0);
+    EdModel changed=m;changed.c[0].f[0].v[0].p.x+=.1;CHECK(!edSurfacePaintOnlyChange(&m,&changed));changed=m;changed.c[0].extraLight+=.1;CHECK(!edSurfacePaintOnlyChange(&m,&changed));
+    EdModel fresh=m;fresh.c[0].f[0].decalId=0;CHECK(edPlaceDecal(&fresh,&fresh.c[0].f[0],edV(1,0,0),1,&image,&green,.5));
+    before=m;CHECK(edPlaceDecal(&m,&m.c[0].f[0],edV(1,0,0),1,&image,&green,.5)&&edSurfacePaintOnlyChange(&before,&m));CHECK(*m.decals[0].data==*fresh.decals[0].data);CHECK(edDecalImage(&m,1,&image));CHECK(image.rgba[((image.height/2)*image.width+image.width-3)*4+1]>100);
+    // A tiled pattern stays anchored to the face, not to the brush center.
+    EdPaintImage pattern;pattern.width=2;pattern.height=1;pattern.rgba={0,255,0,255,0,0,255,255};
+    EdModel a,b;edDefault(&a);b=a;CHECK(edPlaceDecal(&a,&a.c[0].f[0],edV(-.1,0,0),1,&red,&pattern,.8));CHECK(edPlaceDecal(&b,&b.c[0].f[0],edV(.1,0,0),1,&red,&pattern,.8));EdPaintImage ia,ib;CHECK(edDecalImage(&a,1,&ia)&&edDecalImage(&b,1,&ib));for(int x=ia.width/2-8;x<ia.width/2+8;x++){size_t p=((ia.height/2)*ia.width+x)*4;CHECK((ia.rgba[p+1]>=ia.rgba[p+2])==(ib.rgba[p+1]>=ib.rgba[p+2]));}
+    unsigned size;unsigned char *wire=edWireEncode(&m,&size);EdModel decoded;CHECK(wire&&edWireDecode(&decoded,wire,size)&&edModelsEqual(&m,&decoded));edFree(wire);
+    puts("PASS: surface paint falloff, edge painting, anchored tiling and geometry-preserving updates");
+}
+static void terrainPaintTests(void){
+    EdModel source,m,backup,decoded;edDefault(&source);EdSelection selection={};selection.count=1;selection.hits[0]={0,0,-1,-1};
+    CHECK(edTerrainCreate(&m,&source,&selection,"paint_test"));backup=m;
+    CHECK(edTerrainPaint(&m,0,edV(0,0,.002),.75,.5,"green.mat",paintTestName));CHECK(edValidate(&m)&&!edModelsEqual(&m,&backup));
+    for(int i=0;i<m.meshCount;i++)for(int f=0;f<m.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){
+        EdVec p=m.meshes[i].geometry.f[f].v[v].p;double distance=sqrt(p.x*p.x+p.y*p.y)/.75;
+        double expected=distance<1?.5*pow(1-distance*distance,2):0;
+        CHECK(fabs(m.meshes[i].paint[1].weights[f*3+v]-expected)<1e-8);
+    }
+    backup=m;snprintf(m.assets[0].paintSlots[1],128,"blue.mat");
+    CHECK(edTerrainPaint(&m,0,edV(.5,0,.002),.4,.5,"blue.mat",paintTestName));CHECK(m.meshes[0].paint.size()==3);
+    // A changed slot adds a new layer, rather than recoloring old green paint.
+    for(int i=0;i<m.meshCount;i++)for(int f=0;f<m.meshes[i].geometry.count;f++)for(int v=0;v<3;v++)if(m.meshes[i].geometry.f[f].v[v].p.x<0)CHECK(m.meshes[i].paint[1].weights[f*3+v]==backup.meshes[i].paint[1].weights[f*3+v]);
+    uint32_t n;unsigned char *wire=edWireEncode(&m,&n);CHECK(wire&&edWireDecode(&decoded,wire,n)&&edModelsEqual(&decoded,&m));edFree(wire);
+    decoded.meshes[0].paint[0].weights[0]=-1;CHECK(!edMeshValidate(&decoded));
+    edPaintLoadImage=paintTestImage;EdPaintBake bake;CHECK(edPaintBakeAsset(&m,0,&bake)&&bake.mat.size()==140+(size_t)bake.size*bake.size*2&&edNetLoad32(bake.mat.data()+24)==16);
+    // Incremental output must be byte-identical to a fresh bake, including
+    // undo, new layers, texture changes and UV changes.
+    EdPaintBake cached=bake,fresh;CHECK(edPaintBakeAsset(&m,0,&cached,1)&&cached.updatedFaces==0);
+    EdModel painted=m;CHECK(edTerrainPaint(&painted,0,edV(0,0,.002),.26,.25,"blue.mat",paintTestName));
+    CHECK(edPaintOnlyChange(&m,&painted));EdModel moved=painted;moved.c[0].extraLight+=.1;CHECK(!edPaintOnlyChange(&m,&moved));
+    auto begin=std::chrono::steady_clock::now();CHECK(edPaintBakeAsset(&painted,0,&fresh));auto fullEnd=std::chrono::steady_clock::now();
+    CHECK(edPaintBakeAsset(&painted,0,&cached,1));auto partialEnd=std::chrono::steady_clock::now();
+    CHECK(cached.mat==fresh.mat&&cached.updatedFaces>0&&cached.updatedFaces<(int)cached.faceHashes.size()/2);
+    printf("PAINT BAKE: full %.2f ms, incremental %.2f ms (%d/%zu faces)\n",std::chrono::duration<double,std::milli>(fullEnd-begin).count(),std::chrono::duration<double,std::milli>(partialEnd-fullEnd).count(),cached.updatedFaces,cached.faceHashes.size());
+    CHECK(edPaintBakeAsset(&m,0,&cached,1)&&cached.mat==bake.mat); // undo
+    moved=m;moved.meshes[0].geometry.f[0].v[0].u+=.5;
+    CHECK(edPaintBakeAsset(&moved,0,&fresh)&&edPaintBakeAsset(&moved,0,&cached,1)&&cached.mat==fresh.mat&&cached.updatedFaces==1);
+    int vertex=0;for(int i=0;i<m.meshCount;i++)for(int f=0;f<m.meshes[i].geometry.count;f++)for(int v=0;v<3;v++,vertex++){
+        EdVec uv=edScale(bake.uv[vertex],(double)bake.size/std::min(bake.size,256));size_t offset=140+((size_t)(int)uv.y*bake.size+(int)uv.x)*2;unsigned pixel=bake.mat[offset]|unsigned(bake.mat[offset+1])<<8;
+        unsigned red=(unsigned)(m.meshes[i].paint[0].weights[f*3+v]*255+.5)>>3;
+        unsigned green=(unsigned)(m.meshes[i].paint[1].weights[f*3+v]*255+.5)>>2;
+        unsigned blue=(unsigned)(m.meshes[i].paint[2].weights[f*3+v]*255+.5)>>3;CHECK(pixel==(red<<11|green<<5|blue));
+    }
+    const char *resources="SECTION: MATERIALS\nWorld materials 1\n0: red.mat 1 1\nend\n";
+    CHECK(edWriteGob(&m,"test-paint.gob","Paint",0,resources));FILE *file=fopen("test-paint.gob","rb");CHECK(file);fseek(file,0,SEEK_END);long size=ftell(file);rewind(file);std::vector<unsigned char> bytes(size);CHECK(fread(bytes.data(),1,size,file)==size);fclose(file);
+    unsigned dir=edNetLoad32(bytes.data()+8),entries=edNetLoad32(bytes.data()+dir);bool mat=false,meta=false,model=false;char name[32];edPaintFilename(&m,0,name);
+    for(unsigned i=0;i<entries;i++){const unsigned char *entry=bytes.data()+dir+4+i*136;unsigned offset=edNetLoad32(entry),count=edNetLoad32(entry+4);CHECK((size_t)offset+count<=bytes.size());const char *path=(const char*)entry+8;
+        if(strstr(path,name)){CHECK(count==bake.mat.size()&&!memcmp(bytes.data()+offset,bake.mat.data(),count));mat=true;}
+        if(!strcmp(path,"misc\\geosith_models.bin")){edDefault(&decoded);CHECK(edReadMeshData(&decoded,bytes.data()+offset,count)&&edPaintHash(&decoded,0)==edPaintHash(&m,0)&&!strcmp(decoded.assets[0].paintSlots[1],"blue.mat"));meta=true;}
+        if(!strcmp(path,"3do\\paint_test.3do")){std::string text((const char*)bytes.data()+offset,count);CHECK(text.find(name)!=std::string::npos&&text.find("MATERIALS 1")!=std::string::npos);model=true;}
+    }CHECK(mat&&meta&&model);remove("test-paint.gob");edPaintLoadImage=NULL;
+}
+static void textureStitchTests(void){
+    EdFace source={},target={};source.count=target.count=4;source.material=2;target.material=7;
+    EdVec points[]={edV(0,0,0),edV(1,0,0),edV(1,1,0),edV(0,1,0)};
+    for(int v=0;v<4;v++){source.v[v].p=points[v];source.v[v].u=13+points[v].x*80+points[v].y*30;source.v[v].v=-7+points[v].x*20-points[v].y*100;target.v[v].p=edAdd(points[v],edV(1,0,0));}
+    CHECK(edStitchTexture(&target,&source)&&target.material==7&&target.customUV);
+    for(int v=0;v<4;v++){EdVec p=target.v[v].p;CHECK(fabs(target.v[v].u-(13+p.x*80+p.y*30))<1e-8);CHECK(fabs(target.v[v].v-(-7+p.x*20-p.y*100))<1e-8);}
+    EdVec wall[]={edV(1,0,0),edV(1,0,1),edV(1,1,1),edV(1,1,0)};
+    for(int v=0;v<4;v++)target.v[v].p=wall[v];CHECK(edStitchTexture(&target,&source));
+    for(int v=0;v<4;v++){EdVec p=wall[v];CHECK(fabs(target.v[v].u-(13+(1+p.z)*80+p.y*30))<1e-8);CHECK(fabs(target.v[v].v-(-7+(1+p.z)*20-p.y*100))<1e-8);}
+    // Cleaved surfaces can have collinear first corners.
+    source.count=5;source.v[4]=source.v[3];source.v[3]=source.v[2];source.v[2]=source.v[1];source.v[1].p=edV(.5,0,0);source.v[1].u=53;source.v[1].v=3;
+    CHECK(edStitchTexture(&target,&source)&&fabs(target.v[1].u-173)<1e-8);
+    puts("PASS: texture stitching, coplanar tiling, angled seam, scale/rotation and collinear corners");
+}
+static void terrainGrowthTests(void){
+    EdModel source,result,decoded;edDefault(&source);EdSelection selection={};selection.count=1;selection.hits[0]={0,0,-1,-1};
+    for(int i=0;i<24;i++){char name[32];snprintf(name,sizeof(name),"growth%d",i);CHECK(edTerrainCreate(&result,&source,&selection,name));source=result;}
+    CHECK(source.assetCount==24&&source.meshCount>=24&&edValidate(&source));
+    unsigned size=0;unsigned char *wire=edWireEncode(&source,&size);CHECK(wire&&edWireDecode(&decoded,wire,size)&&edModelsEqual(&source,&decoded));edFree(wire);
+    // Malformed large counts cannot allocate based on a tiny metadata payload.
+    unsigned char invalid[16]={'G','3','D','O',7};edNetStore32(invalid+8,INT_MAX);CHECK(!edReadMeshData(&decoded,invalid,sizeof(invalid)));
+    puts("PASS: 24 terrain assets, growing meshes, network roundtrip and bounded malformed metadata");
+}
 static void terrainTests(void){
     EdModel source,terrain,before,decoded;edDefault(&source);EdSelection surfaces={};surfaces.count=1;surfaces.hits[0]={0,0,-1,-1};
     CHECK(edTerrainCreate(&terrain,&source,&surfaces,"terrain_test")&&edValidate(&terrain));CHECK(terrain.assetCount==1&&terrain.assets[0].terrain&&terrain.assets[0].terrainNormal.z>.999);
     int triangles=0,pinned=0,free=0;double area=0;for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++){const EdFace &face=terrain.meshes[i].geometry.f[f];CHECK(face.count==3);triangles++;EdVec cross=edCross(edSub(face.v[1].p,face.v[0].p),edSub(face.v[2].p,face.v[0].p));area+=sqrt(edDot(cross,cross))*.5;for(int v=0;v<3;v++)if(terrain.meshes[i].terrainPinned[f*3+v])pinned++;else free++;}
     CHECK(triangles==128&&free&&fabs(area-4)<1e-8);before=terrain;
     CHECK(!edTerrainSmooth(&terrain,0,edV(0,0,0),.75,.5)&&edModelsEqual(&terrain,&before));
-    CHECK(edTerrainSculpt(&terrain,0,edV(0,0,0),.75,.2)&&edValidate(&terrain));double maxHeight=0;
-    for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){const EdVertex &vertex=terrain.meshes[i].geometry.f[f].v[v];maxHeight=fmax(maxHeight,vertex.p.z);if(terrain.meshes[i].terrainPinned[f*3+v])CHECK(vertex.p.z==0);CHECK(vertex.u==before.meshes[i].geometry.f[f].v[v].u&&vertex.v==before.meshes[i].geometry.f[f].v[v].v);}
-    CHECK(fabs(maxHeight-.2)<1e-8);CHECK(edTerrainSculpt(&terrain,0,edV(0,0,0),.75,-.1)&&edValidate(&terrain));
+    CHECK(edTerrainSculpt(&terrain,0,edV(0,0,.002),.75,.2)&&edValidate(&terrain));double maxHeight=0;
+    for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){const EdVertex &vertex=terrain.meshes[i].geometry.f[f].v[v];maxHeight=fmax(maxHeight,vertex.p.z);if(terrain.meshes[i].terrainPinned[f*3+v])CHECK(vertex.p.z==0);CHECK(isfinite(vertex.u)&&isfinite(vertex.v));}
+    CHECK(fabs(maxHeight-.202)<1e-8);CHECK(edTerrainSculpt(&terrain,0,edV(0,0,0),.75,-.1)&&edValidate(&terrain));
     int below=0;for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++)below|=terrain.meshes[i].geometry.f[f].v[v].p.z<-.1;CHECK(!below);
     // Outer-edge vertices from both newly created and previously saved terrain
     // must sculpt even when their old boundary marker is set.
-    CHECK(edTerrainSculpt(&terrain,0,edV(1,0,0),.5,.2));int movedEdge=0;
-    for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){EdVec p=terrain.meshes[i].geometry.f[f].v[v].p;if(fabs(p.x-1)<1e-8&&fabs(p.y)<1e-8){CHECK(fabs(p.z-.2)<1e-8);movedEdge++;}}CHECK(movedEdge>0);
+    CHECK(edTerrainSculpt(&terrain,0,edV(1,0,.002),.5,.2,edV(0,0,1)));int movedEdge=0;
+    for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){EdVec p=terrain.meshes[i].geometry.f[f].v[v].p;if(fabs(p.x-1)<1e-8&&fabs(p.y)<1e-8){CHECK(fabs(p.z-.202)<1e-8);movedEdge++;}}CHECK(movedEdge>0);
     uint32_t size;unsigned char *wire=edWireEncode(&terrain,&size);CHECK(wire&&edWireDecode(&decoded,wire,size)&&edModelsEqual(&terrain,&decoded));edFree(wire);
     const char *resources="SECTION: MATERIALS\nWorld materials 1\n0: dflt.mat 1 1\nend\n";
     CHECK(edWriteGob(&terrain,"test-terrain.gob","Terrain",0,resources));FILE *file=fopen("test-terrain.gob","rb");CHECK(file);fseek(file,0,SEEK_END);long bytes=ftell(file);rewind(file);unsigned char *data=edAlloc(bytes);CHECK(data&&fread(data,1,bytes,file)==bytes);fclose(file);uint32_t dir=edNetLoad32(data+8),count=edNetLoad32(data+dir);int meshFound=0,metaFound=0;
@@ -701,7 +824,7 @@ static void terrainTests(void){
     CHECK(meshFound&&metaFound);edFree(data);remove("test-terrain.gob");
     // Multiple coplanar surfaces share unpinned interior seams.
     CHECK(edCleave(&source,0,0,edV(0,-1,0),edV(0,1,0)));surfaces.count=0;for(int f=0;f<source.c[0].count;f++)if(edNormal(&source.c[0].f[f]).z>.99)surfaces.hits[surfaces.count++]={0,f,-1,-1};CHECK(surfaces.count==2&&edTerrainCreate(&terrain,&source,&surfaces,"joined"));
-    CHECK(edTerrainSculpt(&terrain,0,edV(0,0,0),.5,.1));int seamMoved=0;for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){EdVec p=terrain.meshes[i].geometry.f[f].v[v].p;if(fabs(p.x)<1e-9&&fabs(p.y)<1e-9){CHECK(fabs(p.z-.1)<1e-8);seamMoved++;}}CHECK(seamMoved>1);
+    CHECK(edTerrainSculpt(&terrain,0,edV(0,0,.002),.5,.1,edV(0,0,1)));int seamMoved=0;for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){EdVec p=terrain.meshes[i].geometry.f[f].v[v].p;if(fabs(p.x)<1e-9&&fabs(p.y)<1e-9){CHECK(fabs(p.z-.102)<1e-8);seamMoved++;}}CHECK(seamMoved>1);
     before=terrain;surfaces.hits[1]={-1,1,-1,-1};CHECK(!edTerrainCreate(&terrain,&source,&surfaces,"invalid")&&edModelsEqual(&terrain,&before));
     edDefault(&source);CHECK(edCleave(&source,0,0,edV(.13,-1,0),edV(.13,1,0)));surfaces.count=0;for(int f=0;f<source.c[0].count;f++)if(edNormal(&source.c[0].f[f]).z>.99)surfaces.hits[surfaces.count++]={0,f,-1,-1};CHECK(edTerrainCreate(&terrain,&source,&surfaces,"offgrid_seam"));
     for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int e=0;e<3;e++){
@@ -731,7 +854,7 @@ static void terrainTests(void){
     for(int c=0;c<source.count;c++)for(int f=0;f<source.c[c].count;f++)if(edNormal(&source.c[c].f[f]).z>.99)surfaces.hits[surfaces.count++]={c,f,-1,-1};
     CHECK(edTerrainCreate(&terrain,&source,&surfaces,"multi_sector")&&terrain.assetCount==2);
     CHECK(terrain.assets[0].terrainGroup==terrain.assets[1].terrainGroup);before=terrain;
-    for(int stroke=0;stroke<4;stroke++)CHECK(edTerrainSculpt(&terrain,stroke%2,edV(0,1,.05*stroke),.7,.05));
+    for(int stroke=0;stroke<4;stroke++)CHECK(edTerrainSculpt(&terrain,stroke%2,edV(0,1,.002+.05*stroke),.7,.05,edV(0,0,1)));
     int shared[2]={};EdVec seam={};
     for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){
         EdVec old=before.meshes[i].geometry.f[f].v[v].p,p=terrain.meshes[i].geometry.f[f].v[v].p;
@@ -740,7 +863,7 @@ static void terrainTests(void){
     before=terrain;EdVec brush=seam;CHECK(edTerrainSmooth(&terrain,1,brush,.6,.5)&&edMeshValidate(&terrain));shared[0]=shared[1]=0;
     for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){
         EdVec old=before.meshes[i].geometry.f[f].v[v].p,p=terrain.meshes[i].geometry.f[f].v[v].p;
-        CHECK(fabs(p.x-old.x)<1e-12&&fabs(p.y-old.y)<1e-12);
+
         EdVec d=edSub(old,brush);if(edDot(d,d)>=.36)CHECK(edDot(edSub(old,p),edSub(old,p))<1e-20);
         if(fabs(old.x)<1e-8&&fabs(old.y-1)<1e-8){if(shared[0]+shared[1])CHECK(edDot(edSub(p,seam),edSub(p,seam))<1e-20);seam=p;shared[terrain.meshes[i].asset]++;}
     }CHECK(shared[0]&&shared[1]&&seam.z<brush.z);
@@ -750,11 +873,48 @@ static void terrainTests(void){
     // Floor and wall share a bisector displacement rather than opening a crack.
     edDefault(&source);surfaces.count=2;surfaces.hits[0]={0,0,-1,-1};surfaces.hits[1]={0,4,-1,-1};
     CHECK(edTerrainCreate(&terrain,&source,&surfaces,"corner")&&terrain.assetCount==1);before=terrain;
-    CHECK(edTerrainSculpt(&terrain,0,edV(0,1,0),.5,.1));int copies=0;
+    CHECK(edTerrainSculpt(&terrain,0,edV(0,1,0),.5,.1,edV(0,-.7071067811865475,.7071067811865475)));int copies=0;
     for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){
         EdVec old=before.meshes[i].geometry.f[f].v[v].p,p=terrain.meshes[i].geometry.f[f].v[v].p;
-        if(fabs(old.x)<1e-8&&fabs(old.y-1)<1e-8&&fabs(old.z)<1e-8){if(copies++)CHECK(edDot(edSub(p,seam),edSub(p,seam))<1e-20);seam=p;}
+        if(fabs(old.x)<1e-8&&fabs(old.y-(1-.002/sqrt(2.0)))<1e-8&&fabs(old.z-.002/sqrt(2.0))<1e-8){if(copies++)CHECK(edDot(edSub(p,seam),edSub(p,seam))<1e-20);seam=p;}
     }CHECK(copies>1&&seam.y<1&&seam.z>0);
+    // Raised initial vertices and changing face normals, not stored base normals.
+    edDefault(&source);surfaces.count=1;surfaces.hits[0]={0,0,-1,-1};CHECK(edTerrainCreate(&terrain,&source,&surfaces,"brushes"));
+    for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){
+        EdVec &p=terrain.meshes[i].geometry.f[f].v[v].p;CHECK(fabs(p.z-.002)<1e-9);p.z+=.3+.2*p.x;
+    }
+    before=terrain;CHECK(edTerrainSculpt(&terrain,0,edV(0,0,.302),.5,.05));int tilted=0;
+    for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){
+        EdVec old=before.meshes[i].geometry.f[f].v[v].p,p=terrain.meshes[i].geometry.f[f].v[v].p;
+        if(fabs(old.x)<1e-9&&fabs(old.y)<1e-9){CHECK(p.x<-.005&&p.z>old.z);tilted++;}
+    }CHECK(tilted);
+    // Grab weights come from the original snapshot and allow all three axes.
+    before=terrain;EdVec brushCenter=edV(0,0,.302),drag=edV(.1,.08,.05);CHECK(edTerrainGrab(&terrain,&before,0,brushCenter,.7,drag));int grabbed=0;
+    for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){
+        EdVec old=before.meshes[i].geometry.f[f].v[v].p,p=terrain.meshes[i].geometry.f[f].v[v].p;double r=sqrt(edDot(edSub(old,brushCenter),edSub(old,brushCenter)))/.7;
+        EdVec expected=r<1?edAdd(old,edScale(drag,(1-r*r)*(1-r*r))):old;CHECK(edDot(edSub(p,expected),edSub(p,expected))<1e-20);grabbed+=r<.5;
+    }CHECK(grabbed);CHECK(edTerrainGrab(&terrain,&before,0,brushCenter,.7,edV(0,0,0))&&edModelsEqual(&terrain,&before));
+    // Source texture offsets do not create seams in a linked terrain UV chart.
+    edDefault(&source);CHECK(edExtrude(&source,0,4,edV(0,1,0)));surfaces.count=0;
+    for(int c=0;c<source.count;c++)for(int f=0;f<source.c[c].count;f++)if(edNormal(&source.c[c].f[f]).z>.99){source.c[c].f[f].uOffset=1234*c;source.c[c].f[f].vOffset=-543*c;edMapFace(&source.c[c].f[f]);surfaces.hits[surfaces.count++]={c,f,-1,-1};}
+    CHECK(edTerrainCreate(&terrain,&source,&surfaces,"uv_group"));
+    for(int pass=0;pass<4;pass++){
+        if(pass==1)CHECK(edTerrainSculpt(&terrain,0,edV(0,1,.002),.8,.3,edV(0,0,1)));
+        if(pass==2)CHECK(edTerrainSmooth(&terrain,1,edV(0,1,.3),.8,.4));
+        if(pass==3){before=terrain;CHECK(edTerrainGrab(&terrain,&before,0,edV(0,1,.2),.8,edV(.1,0,.1)));}
+        int seamPairs=0;
+        for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){
+            EdVertex a=terrain.meshes[i].geometry.f[f].v[v];
+            for(int j=i+1;j<terrain.meshCount;j++)for(int g=0;g<terrain.meshes[j].geometry.count;g++)for(int w=0;w<3;w++){
+                EdVertex b=terrain.meshes[j].geometry.f[g].v[w];if(edDot(edSub(a.p,b.p),edSub(a.p,b.p))<1e-16){CHECK(fabs(a.u-b.u)<1e-9&&fabs(a.v-b.v)<1e-9);seamPairs++;}
+            }
+        }CHECK(seamPairs);
+        double relaxedError=0,projectedError=0;
+        for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){
+            EdVertex a=terrain.meshes[i].geometry.f[f].v[v],b=terrain.meshes[i].geometry.f[f].v[(v+1)%3];EdVec d=edSub(a.p,b.p);double target=sqrt(edDot(d,d)),uv=hypot(a.u-b.u,a.v-b.v)/ED_UV_SCALE;
+            relaxedError+=(uv-target)*(uv-target);double projected=hypot(d.x,d.y);projectedError+=(projected-target)*(projected-target);
+        }CHECK(relaxedError<=projectedError+1e-9);
+    }
     puts("PASS: terrain subdivisions, coplanar unions, pinned borders, normal-axis falloff, unchanged backing geometry, mesh export and editable metadata");
 }
 static void splineTests(void){
@@ -765,6 +925,27 @@ static void splineTests(void){
     int wrapped=0;double minV=1e30,maxV=-1e30;
     for(int c=1;c<out.count;c++)for(int f=0;f<out.c[c].count;f++)if(out.c[c].f[f].customUV){wrapped++;for(int v=0;v<out.c[c].f[f].count;v++){minV=fmin(minV,out.c[c].f[f].v[v].v);maxV=fmax(maxV,out.c[c].f[f].v[v].v);}}
     CHECK(wrapped==32&&fabs(minV)<1e-8&&fabs(maxV/64-round(maxV/64))<1e-8);
+    for(double pitch : {-.5,.5}){
+        EdSpline ramp=spline;ramp.count=2;ramp.points[0]={edV(14,0,1),edV(0,1,pitch)};ramp.points[1]={edV(14,5,1+pitch*3),edV(.2,1,pitch)};
+        EdModel generated;CHECK(edSplineRebuild(&generated,&original,&ramp)&&edValidate(&generated));
+        for(int end : {0,1}){int matched=0;EdVec tangent=ramp.points[end].handle,center=ramp.points[end].position;
+            double len=sqrt(edDot(tangent,tangent));tangent=edScale(tangent,1/len);
+            for(int c=1;c<generated.count;c++)for(int f=0;f<generated.c[c].count;f++){
+                const EdFace &face=generated.c[c].f[f];bool cap=face.neighbor<0;
+                for(int v=0;v<face.count;v++)cap=cap&&fabs(edDot(tangent,edSub(face.v[v].p,center)))<1e-8;
+                if(cap){CHECK(fabs(edDot(edNormal(&face),tangent))>.999999);matched++;}
+            }CHECK(matched==1);
+        }
+    }
+    // Every interior ring, not only the ends, stays perpendicular on slopes.
+    for(EdVec tangent : {edV(0,1,.5),edV(.3,1,-.7),edV(0,0,1)}){
+        EdSpline slope=spline;slope.count=2;slope.width=slope.height=.5;
+        slope.points[0]={edV(20,0,3),tangent};slope.points[1]={edAdd(slope.points[0].position,edScale(tangent,5)),tangent};
+        EdModel generated;CHECK(edSplineRebuild(&generated,&original,&slope)&&edValidate(&generated));int joins=0;
+        EdVec normal=edScale(tangent,1/sqrt(edDot(tangent,tangent)));
+        for(int c=1;c<generated.count;c++)for(int f=0;f<generated.c[c].count;f++)if(generated.c[c].f[f].neighbor>=0){CHECK(fabs(edDot(edNormal(&generated.c[c].f[f]),normal))>.999999);joins++;}
+        CHECK(joins==2*(slope.segments-1));
+    }
     EdModel uvSaved=out;edMapWorld(&out);CHECK(edModelsEqual(&out,&uvSaved));
     // Every shared corner has the same axial UV and wraps by whole texture tiles.
     for(int c=1;c<out.count;c++)for(int f=0;f<out.c[c].count;f++)if(out.c[c].f[f].customUV)for(int v=0;v<out.c[c].f[f].count;v++){
@@ -805,12 +986,113 @@ static void splineTests(void){
     // A spline fully hidden inside an existing sector still has usable controls.
     reflected.mirrorAxes=0;reflected.points[0].position=edV(-.5,0,.5);reflected.points[1].position=edV(.5,0,.5);reflected.width=reflected.height=.25;
     CHECK(edSplineRebuild(&out,&original,&reflected)&&out.splineCount==1);reflected.points[0].position.y=reflected.points[1].position.y=4;CHECK(edSplineRebuild(&moved,&out,&reflected)&&moved.splineCount==1&&moved.count>original.count);
+    // Monolith: a narrow 12-sided spline turning from vertical to horizontal.
+    // Near-coplanar hull planes previously left holes in four of its sections.
+    EdSpline monolith={};monolith.id=91;monolith.count=4;monolith.sides=12;monolith.segments=32;monolith.width=monolith.height=.25;
+    monolith.points[0]={edV(6.375,-.875,2.625),edV(-9.7986284348650088e-6,0,-.12636165063206306)};
+    monolith.points[1]={edV(5.75,-.875,-.5),edV(-.77401585539385032,0,-.6672152185094129)};
+    monolith.points[2]={edV(3.25,-.875,-1.125),edV(-.64390861331719629,0,-.0012763111440730057)};
+    monolith.points[3]={edV(1.25,-.875,-1.125),edV(0,0,0)};
+    EdModel repaired;CHECK(edSplineUpdate(&repaired,&original,&monolith)&&!repaired.splines[0].invalid&&edValidate(&repaired));
+    auto endRoom=std::make_unique<EdModel>(original);for(int f=0;f<endRoom->c[0].count;f++)for(int v=0;v<endRoom->c[0].f[f].count;v++)endRoom->c[0].f[f].v[v].p=edAdd(endRoom->c[0].f[f].v[v].p,edV(.25,-.875,-1.625));
+    CHECK(edSplineUpdate(&repaired,endRoom.get(),&monolith)&&!repaired.splines[0].invalid&&edValidate(&repaired));
+
+    // A temporary intersection must not leave its portal subdivisions behind.
+    EdSpline touching={};touching.id=1;touching.count=2;touching.sides=4;touching.segments=4;touching.width=touching.height=.5;
+    touching.points[0]={edV(0,0,.5),edV(1,0,0)};touching.points[1]={edV(5,0,.5),edV(1,0,0)};
+    EdModel joined,away,invalid;CHECK(edSplineUpdate(&joined,&original,&touching));CHECK(!joined.splines[0].invalid&&joined.c[0].count>original.c[0].count);
+    EdSpline shifted=joined.splines[0];for(int p=0;p<shifted.count;p++)shifted.points[p].position.y+=8;
+    CHECK(edSplineUpdate(&away,&joined,&shifted));CHECK(away.c[0].count==original.c[0].count);
+    for(int f=0;f<away.c[0].count;f++)CHECK(away.c[0].f[f].count==4);
+    EdSpline second=touching;second.id=2;for(int p=0;p<second.count;p++)second.points[p].position.y+=.125;
+    EdModel both,firstAway,allAway;CHECK(edSplineUpdate(&both,&joined,&second));CHECK(edSplineUpdate(&firstAway,&both,&shifted));for(int p=0;p<second.count;p++)second.points[p].position.y+=8;CHECK(edSplineUpdate(&allAway,&firstAway,&second));CHECK(allAway.c[0].count==original.c[0].count);for(int f=0;f<allAway.c[0].count;f++)CHECK(allAway.c[0].f[f].count==4);
+    // Collapsed/invalid controls remain editable, with no live spline cells.
+    EdSpline bad=touching;bad.points[1]=bad.points[0];bad.points[0].handle=bad.points[1].handle=edV(0,0,0);
+    CHECK(edSplineUpdate(&invalid,&joined,&bad));CHECK(invalid.splines[0].invalid&&invalid.count==original.count&&edValidate(&invalid));
+    data=edWireEncode(&invalid,&size);CHECK(data&&edWireDecode(&decoded,data,size)&&edModelsEqual(&decoded,&invalid));edFree(data);
+    CHECK(edWriteGob(&invalid,"test-spline-invalid.gob","Draft",0,"SECTION: HEADER\n"));file=fopen("test-spline-invalid.gob","rb");CHECK(file);fseek(file,0,SEEK_END);bytes=ftell(file);rewind(file);text=edAlloc(bytes+1);CHECK(text&&fread(text,1,bytes,file)==bytes);fclose(file);text[bytes]=0;
+    decoded=invalid;decoded.splines.clear();edSplineReadMetadata(&decoded,text+12);edFree(text);remove("test-spline-invalid.gob");CHECK(edModelsEqual(&decoded,&invalid));
+    CHECK(edSplineUpdate(&away,&invalid,&shifted)&&!away.splines[0].invalid&&away.count>original.count);
+    // Saved cut provenance survives a reload and still restores the wall.
+    CHECK(edWriteGob(&joined,"test-spline-cuts.gob","Cuts",0,"SECTION: HEADER\n"));file=fopen("test-spline-cuts.gob","rb");CHECK(file);fseek(file,0,SEEK_END);bytes=ftell(file);rewind(file);text=edAlloc(bytes+1);CHECK(text&&fread(text,1,bytes,file)==bytes);fclose(file);text[bytes]=0;
+    decoded=joined;decoded.splines.clear();edSplineReadMetadata(&decoded,text+12);edFree(text);remove("test-spline-cuts.gob");CHECK(edModelsEqual(&decoded,&joined));CHECK(edSplineUpdate(&away,&decoded,&shifted)&&away.c[0].count==original.c[0].count);
     puts("PASS: spline corridors, connected convex sectors, elevation, shape regeneration, wire data and explicit conversion");
 }
+static void arrayTests(void){
+    // A straight spline must retain coplanar face partitions, not replace
+    // their combined outline with a hull face belonging to no source patch.
+    {
+        auto sourceStorage=std::make_unique<EdModel>(),resultStorage=std::make_unique<EdModel>();EdModel &source=*sourceStorage,&result=*resultStorage;edDefault(&source);CHECK(edCleave(&source,0,4,edV(0,1,0),edV(0,1,1)));
+        source.c[0].f[4].material=7;source.c[0].f[6].material=8;EdBuffer<unsigned char> selected;selected[0]=1;CHECK(edGroupCapture(&source,selected,"Split wall"));
+        EdSpline s={};s.id=1;s.count=2;s.sides=4;s.segments=4;s.groupId=1;s.width=2;s.height=1;s.points[0]={edV(30,0,0),edV(0,2,0)};s.points[1]={edV(30,8,0),edV(0,2,0)};
+        CHECK(edSplineRebuild(&result,&source,&s)&&edValidate(&result));int patches=0;
+        for(int c=0;c<result.count;c++)if(result.c[c].splineId)for(int f=0;f<result.c[c].count;f++)if(result.c[c].f[f].material==7||result.c[c].f[f].material==8)patches++;
+        CHECK(patches==8);
+    }
+    auto sourceStorage=std::make_unique<EdModel>(),resultStorage=std::make_unique<EdModel>();EdModel &source=*sourceStorage,&result=*resultStorage;edDefault(&source);for(int f=0;f<6;f++)source.c[0].f[f].material=f+1;EdBuffer<unsigned char> selected;selected[0]=1;
+    CHECK(edGroupCapture(&source,selected,"Hall section")&&source.groupCount==1&&edValidate(&source));
+    for(int direction=0;direction<6;direction++){
+        CHECK(edGroupArray(&result,&source,1,direction,3)&&edValidate(&result)&&result.count==4);int adjoins=0;for(int c=0;c<result.count;c++)for(int f=0;f<result.c[c].count;f++)adjoins+=result.c[c].f[f].neighbor>=0;CHECK(adjoins==6);
+        EdModel changed;CHECK(edGroupArray(&changed,&result,1,direction,1)&&changed.count==2);CHECK(edGroupArray(&result,&changed,1,direction,0)&&result.count==1);
+    }
+    CHECK(edExtrudeStep(&source,0,4));selected[1]=1;CHECK(edGroupCapture(&source,selected,"Detailed hallway"));CHECK(edGroupArray(&result,&source,2,2,2)&&edValidate(&result));
+    EdSpline spline={};spline.id=1;spline.count=3;spline.sides=4;spline.segments=4;spline.width=2;spline.height=1;spline.groupId=2;spline.material=99;
+    spline.points[0]={edV(8,0,.5),edV(0,2,0)};spline.points[1]={edV(8,8,.5),edV(1,2,0)};spline.points[2]={edV(12,14,1.5),edV(2,1,0)};
+    CHECK(edSplineRebuild(&result,&source,&spline)&&edValidate(&result));int generated=0,portals=0;
+    for(int c=0;c<result.count;c++)if(result.c[c].splineId){generated++;for(int f=0;f<result.c[c].count;f++){CHECK(result.c[c].f[f].material!=99&&result.c[c].f[f].customUV);portals+=result.c[c].f[f].neighbor>=0;}}CHECK(generated>=8&&portals>=14);
+    unsigned n;unsigned char *wire=edWireEncode(&result,&n);EdModel decoded;CHECK(wire&&edWireDecode(&decoded,wire,n)&&edModelsEqual(&decoded,&result));edFree(wire);
+    EdModel before=result;spline.points[1].position.x+=.25;CHECK(edSplineRebuild(&result,&before,&spline)&&edValidate(&result));
+    {EdModel removed=result;CHECK(edGroupDelete(&removed,1)&&edValidate(&removed));CHECK(removed.groupCount==1&&removed.splines[0].groupId==1&&removed.count==result.count);
+        for(int c=0;c<removed.count;c++)CHECK(removed.c[c].arrayId<=1);
+        CHECK(edGroupDelete(&removed,1)&&edValidate(&removed));CHECK(removed.groupCount==0&&removed.splineCount==0&&removed.count==result.count);
+        for(int c=0;c<removed.count;c++)CHECK(!removed.c[c].arrayId&&!removed.c[c].splineId);
+        CHECK(!edGroupDelete(&removed,1));unsigned length;unsigned char *data=edWireEncode(&removed,&length);EdModel restored;CHECK(data&&edWireDecode(&restored,data,length)&&edModelsEqual(&removed,&restored));edFree(data);}
+    const char *resources="SECTION: MATERIALS\nWorld materials 7\n0: dflt.mat 1 1\n1: dflt.mat 1 1\n2: dflt.mat 1 1\n3: dflt.mat 1 1\n4: dflt.mat 1 1\n5: dflt.mat 1 1\n6: dflt.mat 1 1\nend\n";
+    CHECK(edWriteGob(&result,"test-arrays.gob","Arrays",0,resources));FILE *file=fopen("test-arrays.gob","rb");CHECK(file);fseek(file,0,SEEK_END);long length=ftell(file);rewind(file);std::vector<unsigned char> bytes(length);CHECK(fread(bytes.data(),1,length,file)==length);fclose(file);bool found=false;unsigned dir=edNetLoad32(bytes.data()+8),entries=edNetLoad32(bytes.data()+dir);
+    decoded=result;decoded.groupCount=0;decoded.groups.clear();for(unsigned i=0;i<entries;i++){const unsigned char *entry=bytes.data()+dir+4+i*136;if(!strcmp((const char*)entry+8,"misc\\geosith_groups.bin")){CHECK(edReadGroupData(&decoded,bytes.data()+edNetLoad32(entry),edNetLoad32(entry+4)));found=true;}}CHECK(found&&edModelsEqual(&decoded,&result));
+    decoded.splineCount=0;edSplineReadMetadata(&decoded,(const char*)bytes.data()+12);CHECK(decoded.splineCount==1&&decoded.splines[0].groupId==2);remove("test-arrays.gob");
+    puts("PASS: six array directions, multi-sector groups, regeneration, bent textured spline groups, wire and saved metadata");
+}
 int main(int argc,char **argv) {
+    if(argc==3&&!strcmp(argv[1],"--spline-world")){
+        FILE *f=fopen(argv[2],"rb");CHECK(f);fseek(f,0,SEEK_END);long n=ftell(f);rewind(f);std::vector<unsigned char> bytes(n);CHECK(fread(bytes.data(),1,n,f)==n);fclose(f);auto sourceStorage=std::make_unique<EdModel>(),resultStorage=std::make_unique<EdModel>();EdModel &source=*sourceStorage,&result=*resultStorage;CHECK(edWireDecode(&source,bytes.data(),(uint32_t)n));for(int i=0;i<source.splineCount;i++){CHECK(edSplineUpdate(&result,&source,&source.splines[i])&&!result.splines[i].invalid&&edValidate(&result));}puts("PASS: saved world spline rebuild");return 0;
+    }
+    if(argc==3&&!strcmp(argv[1],"--spline-fixture")){
+        FILE *f=fopen(argv[2],"rb");CHECK(f);fseek(f,0,SEEK_END);long n=ftell(f);rewind(f);std::vector<char> text(n+1);CHECK(fread(text.data(),1,n,f)==n);fclose(f);
+        auto sourceStorage=std::make_unique<EdModel>(),resultStorage=std::make_unique<EdModel>();EdModel &source=*sourceStorage,&result=*resultStorage;edDefault(&source);for(int c=0;c<source.count;c++)for(int f=0;f<source.c[c].count;f++)for(int v=0;v<source.c[c].f[f].count;v++)source.c[c].f[f].v[v].p.x-=100;
+        edSplineReadMetadata(&source,text.data());CHECK(source.splineCount);for(int i=0;i<source.splineCount;i++){EdSpline s=source.splines[i];s.cutBefore.clear();s.cutAfter.clear();printf("Spline %d sides %d segments %d\n",s.id,s.sides,s.segments);CHECK(edSplineRebuild(&result,&source,&s)&&edValidate(&result));}puts("PASS: saved spline generates valid geometry in isolation");return 0;
+    }
+    if(argc==3&&!strcmp(argv[1],"--group-fixture")){
+        FILE *file=fopen(argv[2],"rb");CHECK(file);fseek(file,0,SEEK_END);long size=ftell(file);rewind(file);std::vector<unsigned char> bytes(size);CHECK(fread(bytes.data(),1,size,file)==size);fclose(file);
+        EdModel loaded={},source={},result={};loaded.count=edNetLoad32(bytes.data()+8);CHECK(edReadGroupData(&loaded,bytes.data(),(unsigned)size));edDefault(&source);source.groups=loaded.groups;source.groupCount=loaded.groupCount;
+        for(int g=0;g<source.groupCount;g++){
+            auto &group=source.groups[g];printf("Group %s: %d cells, direction %d\n",group.name,group.count,group.direction);
+            for(int c=0;c<group.count;c++)printf(" cell %d: %d faces\n",c,group.cells[c].count);
+            EdVec lo,hi;CHECK(edGroupBounds(&group,&lo,&hi));EdVec size=edSub(hi,lo),forward=edGroupAxis(group.direction),up=group.direction/2==2?edV(0,1,0):edV(0,0,1);
+            printf("bounds size %g %g %g\n",size.x,size.y,size.z);EdSpline s={};s.id=1;s.count=2;s.sides=4;s.segments=4;s.groupId=g+1;s.width=fabs(edDot(size,edCross(forward,up)));s.height=fabs(edDot(size,up));s.points[0]={edV(30,0,0),edV(0,2,0)};s.points[1]={edV(30,8,0),edV(0,2,0)};
+            CHECK(edSplineRebuild(&result,&source,&s)&&edValidate(&result));
+            for(double bend : {.001,.1,1.0,4.0,-1.0})for(int segments : {4,8}){
+                s.count=3;s.segments=segments;s.points[1]={edV(30,8,0),edV(bend,2,0)};s.points[2]={edV(30+4*bend,16,.5),edV(bend,2,0)};
+                CHECK(edSplineRebuild(&result,&source,&s)&&edValidate(&result));
+                int portals=0;for(int c=0;c<result.count;c++)for(int f=0;f<result.c[c].count;f++){
+                    const EdFace &face=result.c[c].f[f];if(face.neighbor<0)continue;portals++;CHECK(face.mirror>=0&&face.neighbor<result.count);
+                    const EdFace &other=result.c[face.neighbor].f[face.mirror];CHECK(other.neighbor==c&&other.mirror==f);
+                }CHECK(portals>=2*(segments-1));
+                unsigned length=0;unsigned char *wire=edWireEncode(&result,&length);EdModel decoded;CHECK(wire&&edWireDecode(&decoded,wire,length)&&edModelsEqual(&result,&decoded));edFree(wire);
+            }
+            puts("PASS: saved group on straight and curved splines");
+        }return 0;
+    }
     scaleTests();
     mirrorTests();
+    textureStitchTests();
+    terrainGrowthTests();
     terrainTests();
+    arrayTests();
+    surfaceSessionTests();
+    decalTests();
+    surfacePaintTests();
+    terrainPaintTests();
     splineTests();
     setvbuf(stdout,NULL,_IONBF,0);
     EdDoubleTap tap;edResetDoubleTap(&tap,0);
@@ -1117,4 +1399,3 @@ int main(int argc,char **argv) {
         CHECK(edWriteGob(m,argv[2],"Editor smoke test",0,resources));edFree(resources);}
     edFree(m);edFree(backup);puts("PASS: selection, cleave, extrusion, overlap CSG, partial portals, dragging, validation and GOB output");return 0;
 }
-

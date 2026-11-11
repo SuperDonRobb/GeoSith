@@ -1809,6 +1809,8 @@ void sithRender_RenderSectors()
         // Added: Removed the field_4 set?
         for (v75 = 0; v75 < level_idk->numSurfaces; /*v65->field_4 = sithRender_lastRenderTick,*/ ++v65, v75++)
         {
+            int editorRed=jkEditor_SurfaceLocked(v65);
+            if(rdroid_editorTerrainRed!=editorRed){rdCache_Flush();rdroid_editorTerrainRed=editorRed;}
             rdClipFrustum* pSurfaceFrustum = pSectorFrustum;
             if (UNLIKELY(!v65->surfaceInfo.face.geometryMode))
                 continue;
@@ -2418,6 +2420,8 @@ LABEL_150:
             ;    
         }
 
+        if(rdroid_editorTerrainRed){rdCache_Flush();rdroid_editorTerrainRed=0;}
+
         // Surprisingly, this is a fairly minimal cost to the entire render, 3ms on landing terminal spawn
         rdSetProcFaceUserData(level_idk->id | 0x10000);
         int safeguard = 0;
@@ -2995,7 +2999,16 @@ void sithRender_RenderThings()
     
 }
 
+static int sithRender_RenderThingInner(SithThing *pThing);
 int sithRender_RenderThing(SithThing *pThing)
+{
+    int tint=jkEditor_TerrainLockedThing(pThing);
+    if(tint){rdCache_Flush();rdroid_editorTerrainRed=1;}
+    int result=sithRender_RenderThingInner(pThing);
+    if(tint){rdCache_Flush();rdroid_editorTerrainRed=0;}
+    return result;
+}
+static int sithRender_RenderThingInner(SithThing *pThing)
 {
     int ret;
 
@@ -3098,6 +3111,8 @@ void sithRender_RenderAlphaAdjoins()
     for (int i = 0; i < sithRender_numAlphaAdjoins; i++)
     {
         v0 = sithRender_aAlphaAdjoins[i];
+        int editorRed=jkEditor_SurfaceLocked(v0);
+        if(rdroid_editorTerrainRed!=editorRed){rdCache_Flush();rdroid_editorTerrainRed=editorRed;}
         v1 = v0->pSector;
         surfaceSector = v1;
         rdClipFrustum* pSurfaceFrustum = v1->pClipFrustum;
@@ -3320,6 +3335,8 @@ void sithRender_RenderAlphaAdjoins()
         rdSetProcFaceUserData(surfaceSector->id);
         rdCache_AddProcFace(0, meshinfo_out.numVertices, v23);
     }
+
+    if(rdroid_editorTerrainRed){rdCache_Flush();rdroid_editorTerrainRed=0;}
 
     // DSi doesn't really have Z buffer options, so just batch everything
 //#ifndef TARGET_TWL

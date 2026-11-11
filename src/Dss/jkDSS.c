@@ -334,6 +334,24 @@ void jkDSS_SendSetSaberInfoMots(SithThing *thing, int personality)
 }
 
 // MOTS altered
+/* A joining editor client can receive appearance packets before the normal
+   post-welcome jkPlayer startup. Bind only a real player slot here, so the
+   reliable packet is not acknowledged and then discarded. */
+static int jkDSS_EnsurePlayerInfo(SithThing *thing)
+{
+    if (!thing || !thing->actorParams.pPlayer) return 0;
+    if (thing->playerInfo) return 1;
+    for (unsigned int i = 0; i < jkPlayer_maxPlayers && i < NUM_JKPLAYER_THINGS; ++i) {
+        if (jkPlayer_playerInfos[i].pLocalPlayer == thing &&
+            thing->actorParams.pPlayer == &jkPlayer_playerInfos[i]) {
+            playerThings[i].actorThing = thing;
+            thing->playerInfo = &playerThings[i];
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int jkDSS_ProcessSetSaberInfoMots(SithMessage *msg)
 {
     SithPlayer *v11; // [esp+10h] [ebp-88h]
@@ -352,8 +370,7 @@ int jkDSS_ProcessSetSaberInfoMots(SithMessage *msg)
     if ( !v2 )
         return 0;
     v11 = v2->actorParams.pPlayer;
-    if ( !v11 || !v2->playerInfo )
-        return 0;
+    if (!jkDSS_EnsurePlayerInfo(v2)) return 0;
     NETMSG_POPSTR(model_3do_fname, 0x20);
     NETMSG_POPSTR(v14, 0x20);
     NETMSG_POPSTR(material_side_fname, 0x20);
@@ -446,23 +463,22 @@ int jkDSS_ProcessSetSaberInfo(SithMessage *msg)
         jk_fatal();
     }
 
+    const int isRequest = msg->netMsg.cogMsgId == DSS_SABERINFO1;
     NETMSG_IN_START(msg);
 
-    if ( msg->netMsg.cogMsgId == DSS_SABERINFO1 && !sithNet_isServer )
+    if ( isRequest && !sithNet_isServer )
         return 1;
 
     SithThing* v2 = sithThing_GetGuidThing(NETMSG_POPS32());
-    if ( !v2 )
-        return 0;
+    if (!v2) return 0;
     v11 = v2->actorParams.pPlayer;
-    if ( !v11 || !v2->playerInfo )
-        return 0;
+    if (!jkDSS_EnsurePlayerInfo(v2)) return 0;
     NETMSG_POPSTR(model_3do_fname, 0x20);
     NETMSG_POPSTR(v14, 0x20);
     NETMSG_POPSTR(material_side_fname, 0x20);
     NETMSG_POPSTR(material_tip_fname, 0x20);
 
-    if ( msg->netMsg.cogMsgId == DSS_SABERINFO1 )
+    if ( isRequest )
     {
         if ( (sithNet_MultiModeFlags & MULTIMODEFLAG_20) != 0 )
             return 1;
@@ -476,8 +492,7 @@ int jkDSS_ProcessSetSaberInfo(SithMessage *msg)
         }
     }
     rdModel3* v5 = sithModel_Load(model_3do_fname, 1);
-    if ( !v5 )
-        return 1; // MOTS removed
+    if (!v5) {stdPlatform_Printf("GeoSith: unable to load multiplayer model %s\n",model_3do_fname);return 1;}
     sithThing_SetThingModel(v2, v5);
     sithSoundClass* v6 = sithSoundClass_Load(v14);
     if ( v6 )
@@ -489,9 +504,19 @@ int jkDSS_ProcessSetSaberInfo(SithMessage *msg)
 
     if ( sithNet_isServer )
     {
-        if ( msg->netMsg.cogMsgId == DSS_SABERINFO1 )
+        if ( isRequest )
         {
             jkDSS_SendSetSaberInfo(v2);
+            /* The client's request is sent after welcome/startup. Replay the
+               existing players now, including skins announced before its
+               bootstrap world had the host's final player GUIDs. */
+            for (unsigned int i = 0; i < jkPlayer_maxPlayers; ++i) {
+                SithThing *other = jkPlayer_playerInfos[i].pLocalPlayer;
+                if (other && other != v2 && (jkPlayer_playerInfos[i].flags & 1) &&
+                    other->renderData.model3 && other->pSoundClass && other->playerInfo &&
+                    other->playerInfo->polyline.face.material && other->playerInfo->polyline.tipFace.material)
+                    jkDSS_SendSetSaberInfo(other);
+            }
         }
     }
     return 1;

@@ -261,6 +261,7 @@ static void mapWorldLine(EdVec a,EdVec b,int color,int width){a=mapProject(edSub
 static void mapMarker(EdVec point,int first,int color){point=mapProject(edSub(point,mapCenter));double x=point.x*mapZoom+mapWidth*.5,y=mapHeight*.5-point.y*mapZoom;
     if(x>=-12&&y>=-12&&x<mapWidth+12&&y<mapHeight+12)rdPrimit2_DrawClippedCircle(highlightCanvas,(int)x,(int)y,first?8:5,15,color,-1);
 }
+#include "jkEditorGroups.h"
 #include "jkEditorSplineMap.h"
 static void mapDraw(void){
     mapSize();tVBuffer *buffer=highlightCanvas->pVBuffer;int black=mapColor(0,0,0),grid=mapColor(48,48,48),green=mapColor(32,255,64),selected=mapColor(255,48,48),cursor=mapColor(240,240,240);
@@ -302,7 +303,7 @@ static void mapDraw(void){
     snprintf(label,sizeof(label),"MAP %s | Mirror:%s%s%s | Grid: %.0fx | %d sectors | %d sectors / %d handles selected | Tab: 3D",mapViewNames[mapView],mapMirrorAxes&1?"X":"",mapMirrorAxes&2?"Y":"",mapMirrorAxes&4?"Z":"",spacing/ED_GRID,model->count,count,picks.count);editorDrawText(buffer,jkGui_stdFonts[0],12,12,mapWidth-24,label,1);
     editorDrawText(buffer,jkGui_stdFonts[0],12,34,mapWidth-24,"1 Top | 2 Front | 3 Left | 4 Bottom | 5 Back | 6 Right | Middle: options",1);
     editorDrawText(buffer,jkGui_stdFonts[0],12,56,mapWidth-24,"LMB select / box | RMB move | Space pan | Wheel zoom | Ctrl+C/V copy/paste",1);
-    editorDrawText(buffer,jkGui_stdFonts[0],12,78,mapWidth-24,"S spline | C cleave | Delete selected | Shift+LMB draw | Insert new sector",1);
+    editorDrawText(buffer,jkGui_stdFonts[0],12,78,mapWidth-24,"Enter: groups/arrays | S spline | C cleave | Delete | Shift+LMB draw | Insert new",1);
     editorDrawText(buffer,jkGui_stdFonts[0],12,mapHeight-28,mapWidth-24,message,1);stdDisplay_VBufferUnlock(buffer);
 }
 static int mapMirrorTest(SithThing *player){
@@ -459,8 +460,15 @@ static int splineSelfTest(SithThing *player){
     clearHistory();mapOpen(player);mapCenter=edV(4,2,0);mapZoom=80;mapLeft=mapRight=0;
     int originalCount=model->count;
     splineBegin(edV(4,0,.5));if(model->splineCount!=1)return 0;
+    active=1;if(jkEditor_HandleEscape()!=1||model->splineCount||splineDrawing||model->count!=originalCount)return 0;
+    mapSelected[0]=1;mapBeginCleave();if(jkEditor_HandleEscape()!=1||mapCleaveMode)return 0;mapSelected.clear();
+    if(jkEditor_HandleEscape()!=0)return 0; // Idle map Escape must reach pause.
+    clearHistory();
+    splineBegin(edV(4,0,.5));if(model->splineCount!=1)return 0;
     mapX=mapWidth*.5;mapY=mapHeight*.5-80;
-    mapInput(0,0,0,1,0,0,0,0,0,0);mapInput(40,-40,0,1,0,0,0,0,0,0);mapInput(0,0,0,0,0,0,0,0,0,0);
+    mapInput(0,0,0,1,0,0,0,0,0,0);mapInput(40,-40,0,1,0,0,0,0,0,0);
+    if(!splineDragging||!splineHandle||edDot(splineDraft.points[splinePoint].handle,splineDraft.points[splinePoint].handle)<.01)return 0;
+    mapInput(0,0,0,0,0,0,0,0,0,0);
     if(model->splineCount!=1||model->splines[0].count!=2||model->count<=originalCount)return 0;
     mapInput(200,-40,0,1,0,0,0,0,0,0);mapInput(0,0,0,0,0,0,0,0,0,0);mapEscape();
     if(splineDrawing||model->splines[0].count!=3)return 0;
@@ -473,6 +481,26 @@ static int splineSelfTest(SithThing *player){
     EdVec point=model->splines[0].points[0].position,origin=edAdd(point,edV(0,-2,0)),direction=edV(0,1,0);
     splineControl3D(origin,direction,0,1,0);splineControl3D(edAdd(origin,edV(.125,0,0)),direction,0,1,0);splineControl3D(origin,direction,0,0,0);
     if(fabs(model->splines[0].points[0].position.x-point.x-.125)>ED_EPS)return 0;
+    for(int endpoint : {0,model->splines[0].count-1}){
+        EdModel saved=*model;splineSelected=model->splines[0].id;splinePoint=endpoint;fireDown=grabDown=0;
+        EdVec center=model->splines[0].points[endpoint].position,h=splineVisibleHandle(model->splines[0],endpoint),tip=edAdd(center,h);
+        if(edDot(h,h)<ED_EPS*ED_EPS)return 0;
+        EdVec eye=edAdd(tip,edV(0,0,2)),down=edV(0,0,-1);
+        splineControl3D(eye,down,0,1,0);if(!splineDragging||splineHandle!=1)return 0;
+        splineControl3D(edAdd(eye,edV(ED_GRID,0,0)),down,0,1,0);splineControl3D(eye,down,0,0,0);
+        if(edModelsEqual(&saved,model)||!edValidate(model)||!historyStep(0)||!edModelsEqual(&saved,model))return 0;
+    }
+    // Whole-curve RMB movement translates every point, preserving handles.
+    {EdModel saved=*model;mapOpen(player);splineSelected=model->splines[0].id;splinePoint=-1;mapLeft=mapRight=0;
+        mapInput(0,0,0,0,1,0,0,0,0,0);mapInput(80,0,0,0,1,0,0,0,0,0);mapInput(0,0,0,0,0,0,0,0,0,0);
+        EdVec delta=edSub(model->splines[0].points[0].position,saved.splines[0].points[0].position);if(edDot(delta,delta)<.01)return 0;
+        for(int p=0;p<model->splines[0].count;p++){EdVec d=edSub(edSub(model->splines[0].points[p].position,saved.splines[0].points[p].position),delta);if(edDot(d,d)>1e-10)return 0;}
+        if(!historyStep(0)||!edModelsEqual(model,&saved))return 0;mapClose(player);
+        EdSpline bad=model->splines[0];for(int p=1;p<bad.count;p++)bad.points[p].position=bad.points[0].position;for(int p=0;p<bad.count;p++)bad.points[p].handle=edV(0,0,0);
+        if(!splinePublish(bad)||!model->splines[0].invalid||model->count!=originalCount||!model->splines[0].preview.size()||!historyStep(0)||!edModelsEqual(model,&saved))return 0;
+    }
+    puts("GEOSITH_SPLINE drafts PASS: whole-curve drag, invalid preview, live geometry removal and undo");
+    puts("GEOSITH_SPLINE endpoint handles PASS: both ends selectable, draggable and undoable");
     edCopyModel(candidate,model);candidate->c[originalCount].f[0].material++;remember();
     if(!commit()||model->splineCount!=1||!historyStep(0)||model->splineCount!=1)return 0;
     splineSelected=model->splines[0].id;if(!splineConvertSelected()||model->splineCount||!historyStep(0)||model->splineCount!=1)return 0;

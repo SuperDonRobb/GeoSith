@@ -1,15 +1,16 @@
 #include "edNet.h"
+#include "edNetZip.h"
 #include "edWire.h"
 #include "Gameplay/sithPlayer.h"
 /* Editor messages have their own bounded, cumulative-ACK stream. This avoids
  * exhausting JK's 32-entry reliable gameplay-message retry queue. */
 #define EN_MAGIC 0x45444e32u
-#define EN_VERSION 5u
+#define EN_VERSION 8u
 #define EN_CHUNK 1400u
-enum {EN_STATE=1,EN_EDIT,EN_HELLO,EN_ACK,EN_UNDO,EN_REDO,EN_REJECT};
+enum {EN_STATE=1,EN_EDIT,EN_HELLO,EN_ACK,EN_UNDO,EN_REDO,EN_REJECT,EN_TERRAIN_LOCK,EN_TERRAIN_LOCK_STATE,EN_TERRAIN_RELEASE,EN_TERRAIN_EDIT};
 typedef struct {uint32_t magic,version,kind,id,revision,gesture,origin,total,raw,hash,offset,length,base;} EditorNetHeader;
 typedef struct {unsigned char *bytes;EditorNetHeader h;uint32_t at,sent,time;unsigned char *rawBytes;} EditorNetStream;
-typedef struct {int player,ready,dirty,dirtyOrigin;uint32_t gesture,lastCommand,dirtyGesture;EditorNetStream tx,rx;unsigned char *outBase,*inBase;uint32_t outSize,inSize;} EditorNetPeer;
+typedef struct {int player,ready,dirty,dirtyOrigin;uint32_t gesture,lastCommand,dirtyGesture,lastSnapshot;EditorNetStream tx,rx;unsigned char *outBase,*inBase;uint32_t outSize,inSize;} EditorNetPeer;
 typedef struct {uint32_t layout,modelBytes,materials,resources,cogs,editing,objects,assets;int32_t players[ED_SPAWNS];} EditorNetDocument;
 static EditorNetPeer netPeers[32];
 static uint32_t netRevision,netGesture=1,netSequence=1,netLastHello,netCommand;
@@ -27,6 +28,19 @@ static EdModel *netConfirmed;
 static uint32_t netQueuedGesture;
 static int32_t netObjectGuids[ED_OBJECTS];
 static char *netCogTexts[ED_COGS];static char netCogNames[ED_COGS][32];static int netCogCount;
+struct TerrainLease {int owner=0;uint32_t token=0,revision=0,completed=0;};
+static std::map<std::string,TerrainLease> terrainLeases;
+static std::map<int,uint32_t> terrainCancelled;
+static uint32_t terrainAcceptedRevision;
+static std::string terrainSessionKey;
+static EdModel *terrainSessionBase;
+static int terrainSessionFinishing,terrainLockPending;
+static uint32_t terrainLockToken,terrainLockTime,terrainLeaseRevision,terrainLeaseTime;
+static void terrainLeaseBroadcast(const std::string &key,int player=0);
+static void terrainLeaseRelease(const std::string &key,int completed=0);
+static void terrainSessionReset(void);
+static void terrainLeaseTick(uint32_t now);
+static int terrainLeaseMessage(int sender,const EditorNetHeader &h,const unsigned char *data);
 static uint32_t netLayout(void){return ED_WIRE_VERSION;}
 static int netEnabled(void){return sithNet_isMulti&&jkEditor_IsLevel();}
 int jkEditor_NetOwnsGuid(int guid)try {if(!netEnabled()||!model)return 0;for(int i=0;i<ED_SPAWNS;i++)if(jkPlayer_playerInfos[i].pLocalPlayer&&jkPlayer_playerInfos[i].pLocalPlayer->guid==guid)return 1;for(int i=0;i<model->objectCount;i++){int id=objectThings[i];if(id>=0&&id<sithWorld_g_pCurrentWorld->numThingsLoaded&&sithWorld_g_pCurrentWorld->aThings[id].guid==guid)return 1;}return 0;} catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return 0;}
@@ -55,6 +69,17 @@ int jkEditor_NetIgnoreMessage(const SithMessage *m)try {if(!netEnabled())return 
 } catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return 0;}
 static int netClient(void){return netEnabled()&&!sithNet_isServer;}
 static int netEditPending(void){return netClient()&&(!netReady||netBusy||netQueued!=NULL);}
+static int netEditStatus(char *text,size_t size){
+    if(terrainSessionFinishing==2){snprintf(text,size,"Releasing edit lock...");return 1;}
+    if(terrainLockPending){snprintf(text,size,"Requesting edit lock from host...");return 1;}
+    if(terrainSessionBase&&!terrainSessionFinishing){snprintf(text,size,"Surface/terrain locked to you: Esc or switch weapons to finish and share.");return 1;}
+    if(!netEditPending())return 0;
+    EditorNetPeer *p=NULL;for(int i=0;i<32;i++)if(netPeers[i].player==sithNet_serverNetId){p=&netPeers[i];break;}
+    if(!netReady)snprintf(text,size,"Waiting for the host's level data.");
+    else if(p&&p->tx.bytes&&(p->tx.h.kind==EN_EDIT||p->tx.h.kind==EN_TERRAIN_EDIT))snprintf(text,size,"Sending edit to host: %u%% (%u / %u KB)",(unsigned)(100.0*p->tx.at/p->tx.h.total),(p->tx.at+1023)/1024,(p->tx.h.total+1023)/1024);
+    else snprintf(text,size,"Edit preview pending host approval.");
+    return 1;
+}
 static void netSyncObjectGuid(SithThing *thing,int id){if(netClient()&&netReady&&netObjectGuids[id]>=0)thing->guid=netObjectGuids[id];}
 static void netFreeStream(EditorNetStream *s){edFree(s->bytes);edFree(s->rawBytes);edZero(s,0,sizeof(*s));}
 static EditorNetPeer *netPeer(int player,int create){for(int i=0;i<32;i++)if(netPeers[i].player==player)return &netPeers[i];if(create&&player>0)for(int i=0;i<32;i++)if(!netPeers[i].player){netPeers[i].player=player;netPeers[i].ready=-1;return &netPeers[i];}return NULL;}
@@ -77,9 +102,12 @@ static int netValidModel(const EdModel *m,int materials){
     for(int s=0;s<m->count;s++){if(m->c[s].count<4||m->c[s].count>ED_FACES)return netInvalid(__LINE__);for(int f=0;f<m->c[s].count;f++){const EdFace *p=&m->c[s].f[f];if(p->count<3||!edSurfaceVertexCountAllowed(p->count)||p->material<0||p->material>=materials)return netInvalid(__LINE__);
         if(p->neighbor!=-1){if(p->neighbor<0||p->neighbor>=m->count||p->mirror<0||p->mirror>=m->c[p->neighbor].count||m->c[p->neighbor].count>ED_FACES)return netInvalid(__LINE__);const EdFace *q=&m->c[p->neighbor].f[p->mirror];if(q->neighbor!=s||q->mirror!=f)return netInvalid(__LINE__);}
         for(int v=0;v<p->count;v++)if(!isfinite(p->v[v].u)||!isfinite(p->v[v].v))return netInvalid(__LINE__);
-    }}if(!edMeshValidate(m))return netInvalid(__LINE__);for(int i=0;i<m->meshCount;i++)for(int f=0;f<m->meshes[i].geometry.count;f++)if(m->meshes[i].geometry.f[f].material>=materials)return netInvalid(__LINE__);return edValidate(m);
+    }}for(int g=0;g<m->groupCount;g++)for(int c=0;c<m->groups[g].count;c++)for(int f=0;f<m->groups[g].cells[c].count;f++)if(m->groups[g].cells[c].f[f].material<0||m->groups[g].cells[c].f[f].material>=materials)return netInvalid(__LINE__);
+    if(!edMeshValidate(m))return netInvalid(__LINE__);for(int i=0;i<m->meshCount;i++)for(int f=0;f<m->meshes[i].geometry.count;f++)if(m->meshes[i].geometry.f[f].material>=materials)return netInvalid(__LINE__);return edValidate(m);
 }
 static unsigned char *netDocument(const EdModel *source,uint32_t *length){
+    EdModel authoritative;
+    if(sithNet_isServer&&terrainSessionBase&&!terrainSessionFinishing){authoritative=*source;if(!edTerrainOverlay(&authoritative,terrainSessionBase,terrainSessionKey))return NULL;source=&authoritative;}
     if(!customResourceError.empty())return NULL;
     uint32_t modelBytes=0,resourceBytes=resources?(uint32_t)strlen(resources)+1:1;
     unsigned char *encoded=edWireEncode(source,&modelBytes);if(!encoded)return NULL;
@@ -97,15 +125,21 @@ fail:edFree(encoded);for(int i=0;i<ED_COGS;i++)edFree(scripts[i]);return NULL;
 }
 static int netQueueState(EditorNetPeer *peer,int kind,int origin,uint32_t gesture,const EdModel *source){
     uint32_t rawLength=0,packedLength=0;unsigned char *raw=netDocument(source,&rawLength);if(!raw)return 0;
-    unsigned char *packed=edNetPack(raw,rawLength,&packedLength);uint32_t base=0;
-    if(peer->outBase){uint32_t deltaLength=0;unsigned char *delta=edNetDelta(peer->outBase,peer->outSize,raw,rawLength,&deltaLength);
-        if(delta&&deltaLength<packedLength){netDeltaTransfers++;edFree(packed);packed=delta;packedLength=deltaLength;base=edNetHash(peer->outBase,peer->outSize);}else edFree(delta);}
+    unsigned char *packed=edNetZip(raw,rawLength,&packedLength);uint32_t base=0;
+    // The first client edit can reuse the snapshot it just received. Otherwise
+    // even a single decal uploads every unchanged terrain and custom resource.
+    auto useBase=[&](const unsigned char *previous,uint32_t size){if(!previous)return;uint32_t deltaLength=0;unsigned char *delta=edNetZipDelta(previous,size,raw,rawLength,&deltaLength);
+        if(delta&&deltaLength<packedLength){edFree(packed);packed=delta;packedLength=deltaLength;base=edNetHash(previous,size);}else edFree(delta);};
+    useBase(peer->outBase,peer->outSize);
+    if(kind==EN_EDIT||kind==EN_TERRAIN_EDIT)useBase(peer->inBase,peer->inSize);
+    if(base)netDeltaTransfers++;
     if(!packed){edFree(raw);return 0;}netRawBytes+=rawLength;netPackedBytes+=packedLength;netFreeStream(&peer->tx);peer->tx.bytes=packed;peer->tx.rawBytes=raw;
-    peer->tx.h=EditorNetHeader{.kind=(uint32_t)kind,.id=++netSequence,.revision=netRevision,.gesture=gesture,.origin=(uint32_t)origin,.total=packedLength,.raw=rawLength,.hash=edNetHash(raw,rawLength),.base=base};return 1;
+    peer->lastSnapshot=stdPlatform_GetTimeMsec();peer->tx.h=EditorNetHeader{.kind=(uint32_t)kind,.id=++netSequence,.revision=netRevision,.gesture=gesture,.origin=(uint32_t)origin,.total=packedLength,.raw=rawLength,.hash=edNetHash(raw,rawLength),.base=base};return 1;
 }
 static void netFullState(EditorNetPeer *peer,int origin){edFree(peer->outBase);peer->outBase=NULL;peer->outSize=0;netQueueState(peer,EN_STATE,origin,0,model);}
 
-static void netBroadcast(int origin,uint32_t gesture){for(int i=0;i<32;i++)if(netPeers[i].player){EditorNetPeer *p=&netPeers[i];if(p->tx.bytes||(int)sithPlayer_GetPlayerNum(p->player)<0){p->dirty=1;p->dirtyOrigin=origin;p->dirtyGesture=gesture;}else netQueueState(p,EN_STATE,origin,gesture,model);}}
+/* Coalesce rapid brush samples outside packet callbacks. */
+static void netBroadcast(int origin,uint32_t gesture){for(int i=0;i<32;i++)if(netPeers[i].player){EditorNetPeer *p=&netPeers[i];p->dirty=1;p->dirtyOrigin=origin;p->dirtyGesture=gesture;}}
 static void netCommitted(void){if(netEnabled()&&sithNet_isServer){netRevision++;netBroadcast(stdComm_dplayIdSelf,netGesture);}}
 static void netRemember(void){if(!netApplying)netGesture++;}
 static int netApplyLocal(const EdModel *source){
@@ -118,6 +152,7 @@ static void netCancelPrediction(void){
     if(netConfirmed&&netHadState){netApplyLocal(netConfirmed);SithThing *player=sithWorld_g_pCurrentWorld->pLocalPlayer;
         if(!active&&player&&objectSector(model,vec(player->position))<0){nextSpawn=0;teleportWalkplayer(player);}}
 }
+#include "jkEditorTerrainNet.h"
 static int netPropose(const EdModel *proposal){
     if(!netReady||!netConfirmed){say("Waiting for the host's level data.");return 0;}
     if((netBusy||netQueued)&&netQueuedGesture!=netGesture){say("Wait for the host to finish the previous edit.");return 0;}
@@ -127,8 +162,8 @@ static int netPropose(const EdModel *proposal){
     netQueued=queued;edCopyModel(netQueued,model);netQueuedGesture=netGesture;
     say("Edit previewed; checking with host.");return 1;
 }
-static int netHistory(int redo){if(!netReady||netBusy||netQueued){say("Wait for the host to finish the pending edit.");return 0;}EditorNetPeer *p=netPeer(sithNet_serverNetId,1);if(!p)return 0;netCommand=++netSequence;netBusy=1;p->tx.h=EditorNetHeader{.kind=(uint32_t)(redo?EN_REDO:EN_UNDO),.id=netCommand,.revision=netRevision};p->tx.time=0;say(redo?"Redo requested from host.":"Undo requested from host.");return 1;}
-static void netReject(EditorNetPeer *p){netSend(p->player,EditorNetHeader{.kind=EN_REJECT,.revision=netRevision},NULL);netFullState(p,0);}
+static int netHistory(int redo){if(terrainSessionOpen()){terrainSessionFinish();say("Terrain edit finished. Use undo after host approval.");return 0;}if(!netReady||netBusy||netQueued){say("Wait for the host to finish the pending edit.");return 0;}EditorNetPeer *p=netPeer(sithNet_serverNetId,1);if(!p)return 0;netCommand=++netSequence;netBusy=1;p->tx.h=EditorNetHeader{.kind=(uint32_t)(redo?EN_REDO:EN_UNDO),.id=netCommand,.revision=netRevision};p->tx.time=0;say(redo?"Redo requested from host.":"Undo requested from host.");return 1;}
+static void netReject(EditorNetPeer *p){if(p->rx.h.kind==EN_TERRAIN_EDIT)for(auto &entry:terrainLeases)if(entry.second.owner==p->player&&entry.second.token==p->rx.h.gesture)terrainLeaseRelease(entry.first);netSend(p->player,EditorNetHeader{.kind=EN_REJECT,.revision=netRevision},NULL);netFullState(p,0);}
 static int netApplyDocument(EditorNetPeer *peer,EditorNetHeader h,const unsigned char *raw,uint32_t length){
     /* A retry can use a new transfer ID for an already-applied revision. It
        must not cancel a newer pending client request or an ongoing grab. */
@@ -141,7 +176,7 @@ static int netApplyDocument(EditorNetPeer *peer,EditorNetHeader h,const unsigned
     bool sameAssets=customResourceBytes.size()==d.assets&&!memcmp(customResourceBytes.data(),end,d.assets);
     if(sithNet_isServer&&!sameAssets){edFree(incoming);netReject(peer);return 1;}
     if(!sameAssets&&!EdResources::decode(end,d.assets,incomingResources)){edFree(incoming);return 0;}
-    EdResources previousResources=customResources;bool resourcesChanged=false;char *scripts[ED_COGS]={0};int ok=0;
+    int previousPaletteCount=paletteCount;EdResources previousResources=customResources;bool resourcesChanged=false;char *scripts[ED_COGS]={0};int ok=0;
 {
     if(incoming->count<1||incoming->count>ED_CELLS||incoming->cogCount!=(int)d.cogs||incoming->objectCount!=(int)d.objects||manifest[d.resources-1]||strlen(manifest)!=d.resources-1){netInvalid(__LINE__);goto done;}
     for(unsigned int i=0;i<d.materials;i++)if(!netFilename(names[i],128)){if(getenv("GEOSITH_NET_ROLE"))printf("NET bad material %u: %.127s\n",i,names[i]);netInvalid(__LINE__);goto done;}
@@ -150,7 +185,7 @@ static int netApplyDocument(EditorNetPeer *peer,EditorNetHeader h,const unsigned
         for(int j=0;j<parsed.count;j++)if(parsed.params[j].type!=incoming->cogs[i].params[j].type||strcmp(parsed.params[j].name,incoming->cogs[i].params[j].name)){netInvalid(__LINE__);goto done;}
         scripts[i]=edAlloc(n);if(!scripts[i]){netInvalid(__LINE__);goto done;}edCopy(scripts[i],p,n);p+=n;
     }if(p!=end){netInvalid(__LINE__);goto done;}
-    if(sithNet_isServer&&(h.revision!=netRevision||!resources||strcmp(resources,manifest))){netReject(peer);ok=1;{netInvalid(__LINE__);goto done;}}
+    if(sithNet_isServer&&((h.kind!=EN_TERRAIN_EDIT&&h.revision!=netRevision)||!resources||strcmp(resources,manifest))){netReject(peer);ok=1;{netInvalid(__LINE__);goto done;}}
     if(!sithNet_isServer&&!sameAssets){
         setCustomResources(std::move(incomingResources));resourcesChanged=true;resourceForceMaterials=true;liveColormap[0]=0;
         for(int i=0;i<paletteCount;i++){if(paletteOwned[i]&&palette[i])retiredResourceMaterials.push_back(palette[i]);palette[i]=NULL;paletteOwned[i]=0;}
@@ -159,7 +194,9 @@ static int netApplyDocument(EditorNetPeer *peer,EditorNetHeader h,const unsigned
     if(!sithNet_isServer&&(!netHadState||!resources||strcmp(resources,manifest))&&!loadMissingManifestTemplates(manifest)){netInvalid(__LINE__);goto done;}
     if(!netValidModel(incoming,d.materials)){netInvalid(__LINE__);goto done;}
     int map[EDITOR_MATERIALS];for(unsigned int i=0;i<d.materials;i++){map[i]=addMaterialName(names[i]);if(map[i]<0){netInvalid(__LINE__);goto done;}}
+    for(int g=0;g<incoming->groupCount;g++)for(int c=0;c<incoming->groups[g].count;c++)for(int f=0;f<incoming->groups[g].cells[c].count;f++){int &id=incoming->groups[g].cells[c].f[f].material;id=map[id];}
     for(int s=0;s<incoming->count;s++)for(int f=0;f<incoming->c[s].count;f++){int id=map[incoming->c[s].f[f].material];if(!editorMaterial(id)){netInvalid(__LINE__);goto done;}incoming->c[s].f[f].material=id;}
+    for(int i=0;i<incoming->meshCount;i++)for(int f=0;f<incoming->meshes[i].geometry.count;f++){int &id=incoming->meshes[i].geometry.f[f].material;id=map[id];}
     char *newResources=NULL;if(!sithNet_isServer){newResources=edAlloc(d.resources);if(!newResources){netInvalid(__LINE__);goto done;}edCopy(newResources,manifest,d.resources);}
     /* Cache scripts only after the whole document and its exposed symbols pass
        validation. ensureCogSource never overwrites an existing loose script. */
@@ -172,28 +209,44 @@ static int netApplyDocument(EditorNetPeer *peer,EditorNetHeader h,const unsigned
        when saving a copy, rather than that internal bootstrap filename. */
     if(!sithNet_isServer&&initial&&strlen(incoming->header.title)<32){char16_t proposed[32];char filename[32];stdString_CharToWchar(proposed,incoming->header.title,32);if(editorLevelFilename(proposed,filename))stdString_SafeWStrCopy(levelName,proposed,32);}
     netApplying=1;
-    if(sithNet_isServer){if(peer->gesture!=h.gesture){remember();peer->gesture=h.gesture;}edCopyModel(candidate,incoming);ok=commit();if(ok){mapInvalidate();builderPicks.count=0;grabbing=groupGrab=cleaving=objectGrabbing=objectRotating=lightGrabbing=0;netRevision++;netBroadcast(peer->player,h.gesture);}}
-    else{int own=netHadState&&h.origin==(uint32_t)stdComm_dplayIdSelf;
+    if(sithNet_isServer){
+        EdModel published=*model;if(terrainSessionBase)edTerrainOverlay(&published,terrainSessionBase,terrainSessionKey);
+        std::string leased;
+        if(h.kind==EN_TERRAIN_EDIT){for(auto &entry:terrainLeases)if(entry.second.owner==peer->player&&entry.second.token==h.gesture){leased=entry.first;break;}
+            EdModel merged=published;if(leased.empty()||!edTerrainOverlay(&merged,incoming,leased)){netApplying=0;netReject(peer);ok=1;goto done;}*incoming=std::move(merged);
+        }
+        if(!terrainSessionGuard(&published,incoming,h.kind==EN_TERRAIN_EDIT?peer->player:0)){netApplying=0;netReject(peer);ok=1;goto done;}
+        // Undo records the published world, never another player's private preview.
+        if(h.kind==EN_TERRAIN_EDIT||peer->gesture!=h.gesture){edCopyModel(undoModel,&published);undoPicks=picks;pendingUndo=1;peer->gesture=h.gesture;}else pendingUndo=0;
+        if(terrainSessionBase)edTerrainOverlay(incoming,model,terrainSessionKey);
+        edCopyModel(candidate,incoming);ok=commit();
+        if(ok){if(!terrainSessionBase){mapInvalidate();builderPicks.count=0;grabbing=groupGrab=cleaving=objectGrabbing=objectRotating=lightGrabbing=0;}netRevision++;netBroadcast(peer->player,h.gesture);if(!leased.empty())terrainLeaseRelease(leased,1);}
+    }
+    else{int own=netHadState&&h.origin==(uint32_t)stdComm_dplayIdSelf;int replacedPreview=!own&&(netBusy||netQueued);
         if(!netConfirmed)netConfirmed=edAlloc(sizeof(*netConfirmed));
         /* An older accepted drag sample must not replace the newer sample
            already shown locally. Send that sample against the new revision. */
+        int sessionAck=terrainSessionFinishing==1&&((own&&h.gesture==terrainLockToken)||(terrainAcceptedRevision&&h.revision>=terrainAcceptedRevision));
+        int sessionPreview=terrainSessionBase&&!sessionAck;
+        EdModel display=*incoming;if(sessionPreview)edTerrainOverlay(&display,model,terrainSessionKey);
         int keepPreview=own&&netQueued&&netQueuedGesture==h.gesture;
-        ok=netConfirmed&&(keepPreview||netApplyLocal(incoming));if(ok){edCopyModel(netConfirmed,incoming);netRevision=h.revision;netReady=netHadState=1;netValidationFailures=netFatal=0;netBusy=0;netWaiting=0;
+        ok=netConfirmed&&(keepPreview||netApplyLocal(&display));if(ok){edCopyModel(netConfirmed,incoming);netRevision=h.revision;netReady=netHadState=1;netValidationFailures=netFatal=0;if(!sessionPreview)netBusy=0;netWaiting=0;
         /* Approval proves this proposal arrived, even if its final stream ACK
            was lost. Retain that exact raw baseline before releasing the TX. */
-        if(own&&peer->tx.rawBytes&&peer->tx.h.kind==EN_EDIT&&peer->tx.h.gesture==h.gesture){edFree(peer->outBase);peer->outBase=peer->tx.rawBytes;peer->outSize=peer->tx.h.raw;peer->tx.rawBytes=NULL;if(getenv("GEOSITH_NET_ROLE"))printf("GEOSITH_NET_ACK_LOSS PASS: approval confirmed an unacknowledged proposal baseline\n");}
-        netFreeStream(&peer->tx);clearHistory();
-        if(!own){edFree(peer->outBase);peer->outBase=NULL;peer->outSize=0;mapInvalidate();builderPicks.count=0;edFree(netQueued);netQueued=NULL;grabbing=groupGrab=cleaving=objectGrabbing=objectRotating=lightGrabbing=0;hover.cell=-1;picks.count=0;}
+        if(own&&peer->tx.rawBytes&&(peer->tx.h.kind==EN_EDIT||peer->tx.h.kind==EN_TERRAIN_EDIT)&&peer->tx.h.gesture==h.gesture){edFree(peer->outBase);peer->outBase=peer->tx.rawBytes;peer->outSize=peer->tx.h.raw;peer->tx.rawBytes=NULL;if(getenv("GEOSITH_NET_ROLE"))printf("GEOSITH_NET_ACK_LOSS PASS: approval confirmed an unacknowledged proposal baseline\n");}
+        if(!sessionPreview)netFreeStream(&peer->tx);clearHistory();
+        if(!own&&!sessionPreview){edFree(peer->outBase);peer->outBase=NULL;peer->outSize=0;mapInvalidate();builderPicks.count=0;edFree(netQueued);netQueued=NULL;grabbing=groupGrab=cleaving=objectGrabbing=objectRotating=lightGrabbing=0;hover.cell=-1;picks.count=0;}
         for(int i=0;i<ED_SPAWNS;i++)if(d.players[i]>=0&&jkPlayer_playerInfos[i].pLocalPlayer)jkPlayer_playerInfos[i].pLocalPlayer->guid=d.players[i];
         for(int i=0;i<model->objectCount;i++){netObjectGuids[i]=(int32_t)edNetLoad32(raw+sizeof(d)+(size_t)i*4);if(netObjectGuids[i]>=0&&objectThings[i]>=0)sithWorld_g_pCurrentWorld->aThings[objectThings[i]].guid=netObjectGuids[i];}
         SithThing *player=sithWorld_g_pCurrentWorld->pLocalPlayer;if(player&&(initial||(!active&&objectSector(model,vec(player->position))<0))){EdSpawn spawn=model->spawns[playerThingIdx%model->spawnCount];player->position=rdvec(spawn.position);rdVector3 angles=rdvec(spawn.rotation);rdMatrix_BuildRotate34(&player->orient,&angles);rdVector_Zero3(&player->actorParams.headPYR);sithThing_SetSector(player,&sithWorld_g_pCurrentWorld->aSectors[objectSector(model,spawn.position)],1);}
-        if(!h.origin)netRejections++;say(!h.origin?"Host rejected the edit; level synchronized.":own?"Host accepted the edit.":"Level synchronized from host.");}}
+        if(sessionAck)terrainSessionReset();
+        if(!h.origin)netRejections++;say(!h.origin?"Host rejected the edit; level synchronized.":own?"Host accepted the edit.":(replacedPreview&&!sessionPreview)?"Host changed the level before approval; pending edit reverted. Try again.":"Level synchronized from host.");}}
     netApplying=0;
     /* Joining applies the snapshot inside the synchronization menu. It has no
        stale attribute draft to discard and must stay open until DSS_WELCOME. */
     if(ok&&jkMain_bInModalGui&&!(g_submodeFlags&8)&&!netSafeDialog){jkGuiRend_CancelActiveMenu();say("The level changed while this draft was open. Reopen it to edit the current level.");}
 }
-done:if(!ok&&resourcesChanged)setCustomResources(std::move(previousResources));if(ok)materialMetadata();for(int i=0;i<ED_COGS;i++)edFree(scripts[i]);edFree(incoming);return ok;
+done:if(!ok&&resourcesChanged)setCustomResources(std::move(previousResources));if(ok&&(resourcesChanged||paletteCount!=previousPaletteCount))materialMetadata();for(int i=0;i<ED_COGS;i++)edFree(scripts[i]);edFree(incoming);return ok;
 }
 static char *netCogSource(const char *name){for(int i=0;i<netCogCount;i++)if(!__strcmpi(netCogNames[i],name)){size_t n=strlen(netCogTexts[i])+1;char *copy=edAlloc(n);if(copy)edCopy(copy,netCogTexts[i],n);return copy;}return NULL;}
 static void netControlReady(SithThing *player){if(!netNeedsEditorSetup||!netClient()||(g_submodeFlags&8))return;netNeedsEditorSetup=0;savedPhysics=player->physicsParams.flags;savedDebug=g_debugmodeFlags;savedThingFlags=player->flags;player->flags|=SITH_TF_INVULN;setEditorFlight(player,0);for(int i=1;i<=10;i++){sithInventory_SetInventoryAvailable(player,i,1);sithInventory_SetInventory(player,i,100);}sithWeapon_SelectWeapon(player,tool,0);sithCamera_SetCurrentCamera(&sithCamera_g_aCameras[0]);}
@@ -207,40 +260,53 @@ int jkEditor_NetMessage(SithMessage *message)try {
     if(!bindEditorWorld())return 0;
     EditorNetPeer *peer=netPeer(sender,sithNet_isServer?(h.kind==EN_HELLO):1);if(!peer)return 0;
 #ifdef PLATFORM_GNS
-    if(sithNet_isServer&&!stdComm_GNS_EditsAllowed()&&(h.kind==EN_EDIT||h.kind==EN_UNDO||h.kind==EN_REDO)){if(h.kind!=EN_EDIT||h.offset==0)netReject(peer);return 1;}
+    if(sithNet_isServer&&!stdComm_GNS_EditsAllowed()&&(h.kind==EN_EDIT||h.kind==EN_TERRAIN_EDIT||h.kind==EN_TERRAIN_LOCK||h.kind==EN_UNDO||h.kind==EN_REDO)){if(h.kind!=EN_EDIT||h.offset==0){if(h.kind==EN_TERRAIN_EDIT)for(auto &entry:terrainLeases)if(entry.second.owner==sender)terrainLeaseRelease(entry.first);netReject(peer);}return 1;}
 #endif
-    if(h.kind==EN_ACK){EditorNetStream *tx=&peer->tx;if(tx->bytes&&h.id==tx->h.id&&h.offset>tx->at&&h.offset<=tx->sent){tx->at=h.offset;tx->time=0;if(tx->at==tx->h.total){peer->ready=tx->h.revision;edFree(peer->outBase);peer->outBase=tx->rawBytes;peer->outSize=tx->h.raw;tx->rawBytes=NULL;netFreeStream(tx);if(peer->dirty&&(int)sithPlayer_GetPlayerNum(peer->player)>=0){peer->dirty=0;netQueueState(peer,EN_STATE,peer->dirtyOrigin,peer->dirtyGesture,model);}}}return 1;}
+    if(h.kind==EN_TERRAIN_LOCK||h.kind==EN_TERRAIN_LOCK_STATE||h.kind==EN_TERRAIN_RELEASE)return terrainLeaseMessage(sender,h,(const unsigned char*)message->pktData+sizeof(h));
+    if(h.kind==EN_ACK){EditorNetStream *tx=&peer->tx;if(tx->bytes&&h.id==tx->h.id&&h.offset>tx->at&&h.offset<=tx->sent){tx->at=h.offset;tx->time=tx->at==tx->sent?0:stdPlatform_GetTimeMsec();if(tx->at==tx->h.total){peer->ready=tx->h.revision;edFree(peer->outBase);peer->outBase=tx->rawBytes;peer->outSize=tx->h.raw;tx->rawBytes=NULL;netFreeStream(tx);}}return 1;}
     if(h.kind==EN_HELLO){if(sithNet_isServer)netFullState(peer,stdComm_dplayIdSelf);return 1;}
-    if(h.kind==EN_REJECT){if(!sithNet_isServer){edFree(peer->outBase);peer->outBase=NULL;peer->outSize=0;netRejections++;netReady=netBusy=0;netFreeStream(&peer->tx);netCancelPrediction();say("Host rejected the edit; preview reverted. Synchronizing the current level.");}return 1;}
+    if(h.kind==EN_REJECT){if(!sithNet_isServer){edFree(peer->outBase);peer->outBase=NULL;peer->outSize=0;netRejections++;netReady=netBusy=0;netFreeStream(&peer->tx);netCancelPrediction();terrainSessionReset();say("Host rejected the edit; preview reverted. Synchronizing the current level.");}return 1;}
     if(h.kind==EN_UNDO||h.kind==EN_REDO){if(!sithNet_isServer||(int)sithPlayer_GetPlayerNum(sender)<0)return 0;if(peer->lastCommand==h.id){if(!peer->tx.bytes)netQueueState(peer,EN_STATE,sender,0,model);return 1;}peer->lastCommand=h.id;
         if(h.revision!=netRevision){netReject(peer);return 1;}netApplying=1;int ok=historyStep(h.kind==EN_REDO);netApplying=0;if(ok){netRevision++;netBroadcast(sender,0);}else netReject(peer);return 1;}
-    if((h.kind!=EN_EDIT||!sithNet_isServer)&&(h.kind!=EN_STATE||sithNet_isServer))return 0;
-    if(h.kind==EN_EDIT&&(int)sithPlayer_GetPlayerNum(sender)<0)return 0;if(h.kind==EN_STATE&&netHadState&&h.revision<netRevision)return 0;
+    if(((h.kind!=EN_EDIT&&h.kind!=EN_TERRAIN_EDIT)||!sithNet_isServer)&&(h.kind!=EN_STATE||sithNet_isServer))return 0;
+    if((h.kind==EN_EDIT||h.kind==EN_TERRAIN_EDIT)&&(int)sithPlayer_GetPlayerNum(sender)<0)return 0;if(h.kind==EN_STATE&&netHadState&&h.revision<netRevision)return 0;
     if(h.total<1||h.total>ED_NET_LIMIT||h.raw<sizeof(EditorNetDocument)||h.raw>ED_NET_LIMIT/2||h.offset>h.total||h.length>h.total-h.offset||!h.length)return 0;
     EditorNetStream *rx=&peer->rx;if(!rx->bytes||rx->h.id!=h.id){if(h.offset)return 0;netFreeStream(rx);size_t receiving=0;for(int i=0;i<32;i++)if(netPeers[i].rx.bytes)receiving+=netPeers[i].rx.h.total;if(receiving+h.total>ED_NET_LIMIT)return 0;rx->bytes=edAlloc(h.total);if(!rx->bytes)return 0;rx->h=h;}
     if(rx->h.total!=h.total||rx->h.raw!=h.raw||rx->h.hash!=h.hash||rx->h.revision!=h.revision||rx->h.gesture!=h.gesture||rx->h.origin!=h.origin||rx->h.base!=h.base)return 0;
     if(h.offset==rx->at){edCopy(rx->bytes+rx->at,(unsigned char*)message->pktData+sizeof(h),h.length);rx->at+=h.length;}rx->time=stdPlatform_GetTimeMsec();
-    if(rx->at==h.total&&!rx->sent){rx->sent=1;unsigned char *raw=edNetUnpack(rx->bytes,h.total,h.raw);
-        if(raw&&h.base){if(!peer->inBase||edNetHash(peer->inBase,peer->inSize)!=h.base){edFree(raw);raw=NULL;}else for(uint32_t i=0;i<h.raw;i++)raw[i]^=i<peer->inSize?peer->inBase[i]:0;}
+    if(rx->at==h.total&&!rx->sent){rx->sent=1;unsigned char *raw=edNetUnzip(rx->bytes,h.total,h.raw);
+        if(raw&&h.base){
+            const unsigned char *base=NULL;uint32_t baseSize=0;
+            auto matchBase=[&](const unsigned char *data,uint32_t size){if(!base&&data&&edNetHash(data,size)==h.base){base=data;baseSize=size;}};
+            matchBase(peer->inBase,peer->inSize);
+            if(sithNet_isServer&&(h.kind==EN_EDIT||h.kind==EN_TERRAIN_EDIT)){matchBase(peer->outBase,peer->outSize);matchBase(peer->tx.rawBytes,peer->tx.h.raw);}
+            if(!base){edFree(raw);raw=NULL;}else for(uint32_t i=0;i<h.raw;i++)raw[i]^=i<baseSize?base[i]:0;
+        }
         int ok=raw&&edNetHash(raw,h.raw)==h.hash&&netApplyDocument(peer,h,raw,h.raw);if(ok){edFree(peer->inBase);peer->inBase=raw;peer->inSize=h.raw;raw=NULL;}edFree(raw);if(!ok){if(sithNet_isServer)netReject(peer);else{netReady=0;if(++netValidationFailures>=3){netFatal=1;say(netFailureReason[0]?netFailureReason:"Level synchronization failed repeatedly. Check matching game files and GeoSith versions.");}else say("Level validation failed; requesting a complete fresh copy.");}netFreeStream(rx);return 0;}}
     netSend(sender,EditorNetHeader{.kind=EN_ACK,.id=h.id,.offset=rx->at},NULL);return 1;
 } catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return 0;}
-void jkEditor_NetTick(void)try {if(!netEnabled()||!bindEditorWorld())return;uint32_t now=stdPlatform_GetTimeMsec();
+void jkEditor_NetTick(void)try {if(!netEnabled()||!bindEditorWorld())return;uint32_t now=stdPlatform_GetTimeMsec();terrainLeaseTick(now);
     if(!sithNet_isServer){EditorNetPeer *p=netPeer(sithNet_serverNetId,1);if(!p)return;
         if(!netReady&&!netFatal&&now-netLastHello>2000&&(!p->rx.bytes||now-p->rx.time>2000)){netLastHello=now;netSend(p->player,EditorNetHeader{.kind=EN_HELLO},NULL);}
-        if(netReady&&!netBusy&&netQueued){EdModel *q=netQueued;netQueued=NULL;if(netQueueState(p,EN_EDIT,stdComm_dplayIdSelf,netQueuedGesture,q))netBusy=1;
-            else{netReady=0;netCancelPrediction();say("Could not submit the edit; preview reverted. Synchronizing with host.");}edFree(q);}
+        if(netReady&&!netBusy&&netQueued&&(!p->lastSnapshot||now-p->lastSnapshot>=150)){EdModel *q=netQueued;netQueued=NULL;if(netQueueState(p,terrainSessionFinishing==1?EN_TERRAIN_EDIT:EN_EDIT,stdComm_dplayIdSelf,netQueuedGesture,q))netBusy=1;
+            else{netReady=0;netCancelPrediction();if(terrainSessionBase)terrainSessionFinishing=2;say("Could not submit the edit; preview reverted. Synchronizing with host.");}edFree(q);}
         if(netBusy&&!p->tx.bytes&&(!p->rx.bytes||p->rx.sent)&&(p->tx.h.kind==EN_UNDO||p->tx.h.kind==EN_REDO)&&(!p->tx.time||now-p->tx.time>500)){netSend(p->player,p->tx.h,NULL);p->tx.time=now;}
     }
     for(int i=0;i<32;i++){EditorNetPeer *p=&netPeers[i];EditorNetStream *tx=&p->tx;if(!p->player)continue;
-        if(sithNet_isServer&&p->dirty&&!tx->bytes&&(int)sithPlayer_GetPlayerNum(p->player)>=0){p->dirty=0;netQueueState(p,EN_STATE,p->dirtyOrigin,p->dirtyGesture,model);}
-        if(tx->bytes&&(!tx->time||now-tx->time>300)){tx->time=now;for(uint32_t offset=tx->at,n=0;offset<tx->h.total&&n<8;n++){EditorNetHeader h=tx->h;h.offset=offset;h.length=h.total-offset;if(h.length>EN_CHUNK)h.length=EN_CHUNK;if(!netSend(p->player,h,tx->bytes+offset))break;offset+=h.length;if(offset>tx->sent)tx->sent=offset;}}
+        if(getenv("GEOSITH_NET_ROLE")){static uint32_t report[32];if(now-report[i]>5000){report[i]=now;printf("NET FLOW peer=%d tx=%u/%u/%u rx=%u/%u ready=%d\n",p->player,tx->at,tx->sent,tx->h.total,p->rx.at,p->rx.h.total,p->ready);fflush(stdout);}}
+        if(sithNet_isServer&&p->dirty&&!tx->bytes&&(!p->lastSnapshot||now-p->lastSnapshot>=150)&&(int)sithPlayer_GetPlayerNum(p->player)>=0){p->dirty=0;netQueueState(p,EN_STATE,p->dirtyOrigin,p->dirtyGesture,model);}
+        if(tx->bytes){
+            /* Keep at most eight chunks outstanding. Partial ACKs open window
+               space; they must not resend the remaining in-flight chunks. */
+            if(tx->time&&now-tx->time>300){tx->sent=tx->at;tx->time=0;}
+            for(uint32_t n=0;tx->sent<tx->h.total&&tx->sent-tx->at<EN_CHUNK*8&&n<8;n++){EditorNetHeader h=tx->h;h.offset=tx->sent;h.length=h.total-h.offset;if(h.length>EN_CHUNK)h.length=EN_CHUNK;if(!netSend(p->player,h,tx->bytes+h.offset))break;tx->sent+=h.length;if(!tx->time)tx->time=now;}
+        }
         if(p->rx.bytes&&now-p->rx.time>30000)netFreeStream(&p->rx);
     }
 } catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return;}
 int jkEditor_NetJoinRequest(int player)try {if(!netEnabled()||!sithNet_isServer||!bindEditorWorld())return 0;EditorNetPeer *p=netPeer(player,1);if(!p)return 1;if(p->ready>=0)return 0;sithMulti_SyncPlayers(player,0);if(!p->tx.bytes)netQueueState(p,EN_STATE,stdComm_dplayIdSelf,0,model);return 1;} catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return 0;}
-void jkEditor_NetPlayerLeft(int player)try {EditorNetPeer *p=netPeer(player,0);if(!p)return;netFreeStream(&p->tx);netFreeStream(&p->rx);edFree(p->outBase);edFree(p->inBase);edZero(p,0,sizeof(*p));} catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return;}
-static void netClose(void){netFatal=netValidationFailures=0;netFailureReason[0]=0;netHadState=netNeedsEditorSetup=netRejections=0;netTestSend=NULL;edZero(netObjectGuids,0xff,sizeof(netObjectGuids));for(int i=0;i<32;i++){netFreeStream(&netPeers[i].tx);netFreeStream(&netPeers[i].rx);edFree(netPeers[i].outBase);edFree(netPeers[i].inBase);}edZero(netPeers,0,sizeof(netPeers));for(int i=0;i<netCogCount;i++)edFree(netCogTexts[i]);netCogCount=0;edFree(netQueued);netQueued=NULL;edFree(netConfirmed);netConfirmed=NULL;netRevision=netLastHello=netCommand=0;netGesture=netSequence=1;netReady=netWaiting=netBusy=netApplying=netAuthoredSpawns=0;}
+void jkEditor_NetPlayerLeft(int player)try {terrainCancelled.erase(player);for(auto &entry:terrainLeases)if(entry.second.owner==player)terrainLeaseRelease(entry.first);EditorNetPeer *p=netPeer(player,0);if(!p)return;netFreeStream(&p->tx);netFreeStream(&p->rx);edFree(p->outBase);edFree(p->inBase);edZero(p,0,sizeof(*p));} catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return;}
+static void netClose(void){terrainSessionReset();terrainLeases.clear();terrainCancelled.clear();terrainLeaseRevision=terrainLeaseTime=0;netFatal=netValidationFailures=0;netFailureReason[0]=0;netHadState=netNeedsEditorSetup=netRejections=0;netTestSend=NULL;edZero(netObjectGuids,0xff,sizeof(netObjectGuids));for(int i=0;i<32;i++){netFreeStream(&netPeers[i].tx);netFreeStream(&netPeers[i].rx);edFree(netPeers[i].outBase);edFree(netPeers[i].inBase);}edZero(netPeers,0,sizeof(netPeers));for(int i=0;i<netCogCount;i++)edFree(netCogTexts[i]);netCogCount=0;edFree(netQueued);netQueued=NULL;edFree(netConfirmed);netConfirmed=NULL;netRevision=netLastHello=netCommand=0;netGesture=netSequence=1;netReady=netWaiting=netBusy=netApplying=netAuthoredSpawns=0;}
 int jkEditor_NetEpisode(const char *episode)try {if(stockEpisode(episode))return 1;if(!episode||!*episode)return 0;char path[160];snprintf(path,sizeof(path),"Episode/%s%s",episode,strchr(episode,'.')?"":".gob");FILE *f=fopen(path,"rb");if(!f)return 0;uint32_t header[3],count;int found=0;
     if(fread(header,4,3,f)==3&&header[0]==0x20424f47&&header[1]==20&&!fseek(f,header[2],SEEK_SET)&&fread(&count,4,1,f)==1&&count<4096){stdGobDiskEntry e;for(uint32_t i=0;i<count;i++)if(fread(&e,1,sizeof(e),f)==sizeof(e)&&netString(e.fname,128)&&!__strcmpi(e.fname,"misc\\sithed_editor.txt")){found=1;break;}}fclose(f);return found;
 } catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return 0;}

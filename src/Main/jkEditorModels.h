@@ -18,18 +18,19 @@ static int builderOriginHit(EdVec origin,EdVec direction){
     EdVec perpendicular=edSub(offset,edScale(direction,distance));
     return distance>.01&&edDot(perpendicular,perpendicular)<=radius*radius;
 }
-static rdModel3 builderModels[ED_ASSETS];
-static rdThing builderThings[ED_ASSETS];
-static unsigned int builderHashes[ED_ASSETS];
+static EdBuffer<rdModel3> builderModels;
+static EdBuffer<rdThing> builderThings;
+static EdBuffer<unsigned int> builderHashes;
 static const char *builderPrimitiveNames[]={"Box","Sphere","Cylinder","Pyramid"};
 static void line(EdVec a,EdVec b,int color);
 static void vertexCircle(EdVec p,int selected,int color);
 static void drawEditorCrosshair(void);
 int jkEditor_ModelBlue(void){return active&&builderAsset>=0&&!builderRendering;}
-static void builderFreeCache(void){edFree(builderPreview);builderPreview=NULL;for(int a=0;a<ED_ASSETS;a++){rdThing_FreeEntry(&builderThings[a]);builderModels[a].sizeMaterials=0;rdModel3_FreeEntry(&builderModels[a]);edZero(&builderModels[a],0,sizeof(rdModel3));edZero(&builderThings[a],0,sizeof(rdThing));builderHashes[a]=0;}}
+static void builderFreeCache(void){edFree(builderPreview);builderPreview=NULL;for(int a=0;a<(int)builderModels.size();a++){rdThing_FreeEntry(&builderThings[a]);builderModels[a].sizeMaterials=0;rdModel3_FreeEntry(&builderModels[a]);edZero(&builderModels[a],0,sizeof(rdModel3));edZero(&builderThings[a],0,sizeof(rdThing));builderHashes[a]=0;}builderModels.clear();builderThings.clear();builderHashes.clear();}
 static int builderCacheFrom(const EdModel *model,int asset){
     unsigned int hash=2166136261u;int count=0;for(int i=0;i<model->meshCount;i++)if(model->meshes[i].asset==asset){hash=(hash^edCellHash(&model->meshes[i].geometry))*16777619u;count++;}
-    hash^=edNetHash(&model->assets[asset],sizeof(EdAsset));if(!count)return 0;if(builderHashes[asset]==hash&&builderModels[asset].numGeos)return 1;
+    hash^=edNetHash(&model->assets[asset],sizeof(EdAsset));hash^=edPaintHash(model,asset)^decalAssetHash(model,asset);if(!count)return 0;if(builderHashes[asset]==hash&&builderModels[asset].numGeos)return 1;
+    EdPaintBake bake;int painted=edPainted(model,asset),bakeVertex=0;rdMaterial *paintMaterial=painted?terrainBakeLive(model,asset,&bake):NULL;if(painted&&!paintMaterial)return 0;
     rdModel3 *m=&builderModels[asset];rdThing *thing=&builderThings[asset];rdThing_FreeEntry(thing);m->sizeMaterials=0;rdModel3_FreeEntry(m);edZero(m,0,sizeof(*m));edZero(thing,0,sizeof(*thing));builderHashes[asset]=0;
     m->numGeos=1;m->numHNodes=count;m->aGeos[0].numMeshes=count;m->aGeos[0].aMeshes=edCalloc(count,sizeof(rdMesh));m->aHierarchyNodes=edCalloc(count,sizeof(rdHierarchyNode));
     if(!m->aGeos[0].aMeshes||!m->aHierarchyNodes)goto failed;
@@ -41,9 +42,11 @@ static int builderCacheFrom(const EdModel *model,int asset){
         mesh->aVertices=edCalloc(mesh->numVertices,sizeof(rdVector3));mesh->aTexVerticies=edCalloc(mesh->numVertices,sizeof(rdVector2));mesh->vertexNormals=edCalloc(mesh->numVertices,sizeof(rdVector3));mesh->vertices_i=edCalloc(mesh->numVertices,sizeof(flex_t));mesh->vertices_unk=edCalloc(mesh->numVertices,sizeof(flex_t));mesh->faces=edCalloc(c->count,sizeof(rdFace));
         if(!mesh->aVertices||!mesh->aTexVerticies||!mesh->vertexNormals||!mesh->vertices_i||!mesh->vertices_unk||!mesh->faces)goto failed;
         int vnum=0;for(int f=0;f<c->count;f++){
-            const EdFace *src=&c->f[f];rdFace *face=&mesh->faces[f];face->numVertices=src->count;face->geometryMode=4;face->lightingMode=3;face->textureMode=1;face->wallCel=-1;face->material=editorMaterial(src->material);face->normal=rdvec(edNormal(src));
+            const EdFace *src=&c->f[f];rdFace *face=&mesh->faces[f];face->numVertices=src->count;face->geometryMode=4;face->lightingMode=3;face->textureMode=1;face->wallCel=-1;face->material=painted?paintMaterial:editorFaceMaterial(model,src);face->normal=rdvec(edNormal(src));
             face->vertexPosIdx=edCalloc(src->count,sizeof(int));face->vertexUVIdx=edCalloc(src->count,sizeof(int));if(!face->vertexPosIdx||!face->vertexUVIdx)goto failed;
-            for(int v=0;v<src->count;v++,vnum++){EdVec p=edSub(src->v[v].p,model->assets[asset].origin);mesh->aVertices[vnum]=rdvec(p);mesh->aTexVerticies[vnum]=rdVector2{(flex_t)(src->v[v].u),(flex_t)(src->v[v].v)};mesh->vertexNormals[vnum]=face->normal;mesh->vertices_i[vnum]=1;face->vertexPosIdx[v]=face->vertexUVIdx[v]=vnum;mesh->radius=fmax(mesh->radius,sqrt(edDot(p,p)));}
+            // Match exported 3DO prelighting: sector and dynamic lights supply brightness.
+            // The isolated builder preview has its own FULLYLIT rdThing mode below.
+            for(int v=0;v<src->count;v++,vnum++){EdVec p=edSub(src->v[v].p,model->assets[asset].origin);mesh->aVertices[vnum]=rdvec(p);EdVec uv=painted?bake.uv[bakeVertex++]:edV(src->v[v].u,src->v[v].v,0);mesh->aTexVerticies[vnum]=rdVector2{(flex_t)uv.x,(flex_t)uv.y};mesh->vertexNormals[vnum]=face->normal;mesh->vertices_i[vnum]=0;face->vertexPosIdx[v]=face->vertexUVIdx[v]=vnum;mesh->radius=fmax(mesh->radius,sqrt(edDot(p,p)));}
         }m->radius=fmax(m->radius,mesh->radius);
     }
     rdThing_NewEntry(thing,NULL);if(!rdThing_SetModel3(thing,m))goto failed;thing->desiredLightMode=thing->curLightMode=RD_LIGHTMODE_FULLYLIT;builderHashes[asset]=hash;return 1;
@@ -71,6 +74,19 @@ typedef struct {int safe,modal;} BuilderMenuState;
 static BuilderMenuState builderMenuBegin(void){BuilderMenuState state={jkEditor_NetSafeDialog(1),jkMain_bInModalGui};jkMain_bInModalGui=1;sithTime_Pause();stdControl_SetActivation(0);
     if(jkGame_isDDraw){Windows_ShutdownGdi();Video_SwitchToGDI();jkPlayer_Close();jkGame_isDDraw=0;}stdBitmap_EnsureData(jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);jkGui_SetModeMenu(jkGui_stdBitmaps[JKGUI_BM_BK_ESC]->palette);return state;}
 static void builderMenuEnd(BuilderMenuState state){jkGui_SetModeGame();jkMain_SetVideoMode();sithTime_Resume();jkMain_bInModalGui=state.modal;jkEditor_NetSafeDialog(state.safe);stdControl_SetActivation(1);stdControl_Flush();fireDown=grabDown=middleDown=1;}
+static void testNestedMaterialDialogs(void){
+    if(!bindEditorWorld())exit(2);
+    int initialDepth=jkGui_modesets,initialMode=jkGui_GdiMode;
+    for(int i=0;i<8;i++){
+        jkGui_SetModeMenu(jkGui_stdBitmaps[JKGUI_BM_BK_ESC]->palette);
+        int outerDepth=jkGui_modesets;
+        browserObjects=0;materialMenu(1);
+        if(jkGui_modesets!=outerDepth||!jkGui_GdiMode){puts("GEOSITH_NESTED_MATERIAL FAIL: browser leaked menu mode");fflush(stdout);exit(2);}
+        jkGui_SetModeGame();
+        if(jkGui_modesets!=initialDepth||jkGui_GdiMode!=initialMode){puts("GEOSITH_NESTED_MATERIAL FAIL: outer menu did not restore mode");fflush(stdout);exit(2);}
+    }
+    puts("GEOSITH_NESTED_MATERIAL PASS: eight nested material dialogs restore menu mode");fflush(stdout);exit(0);
+}
 static void builderMenu(void){BuilderMenuState state=builderMenuBegin();char16_t names[4][128];for(int i=0;i<4;i++)stdString_CharToWchar(names[i],builderPrimitiveNames[i],128);int choice=chooseList(u"3DO Primitives",names,4,builderPrimitive);if(choice>=0)builderPrimitive=choice;builderMenuEnd(state);}
 static void builderRemoveAsset(EdModel *m,int asset){
     for(int i=0;i<m->meshCount;)if(m->meshes[i].asset==asset){--m->meshCount;for(int shift=i;shift<m->meshCount;shift++)m->meshes[shift]=std::move(m->meshes[shift+1]);}else{if(m->meshes[i].asset>asset)m->meshes[i].asset--;i++;}
@@ -102,7 +118,7 @@ static void builderFinish(void){
     freeMenuStrings(elements);builderEditingName[0]=0;builderAsset=-1;builderHover.cell=-1;builderMenuEnd(state);say(saved?"3DO saved to the model library. Weapon 8: create a template. Save Level packages the model.":"3DO draft discarded.");
 }
 static int builderBegin(EdVec origin,EdVec direction){
-    if(model->assetCount==ED_ASSETS){say("Model limit reached (8 models per level).");return 0;}
+    if(model->assetCount==ED_ASSETS){say("Model index range exhausted.");return 0;}
     builderEditingName[0]=0;remember();edCopyModel(candidate,model);int a=candidate->assetCount++;EdAsset *asset=&candidate->assets[a];edZero(asset,0,sizeof(*asset));asset->origin=edSnapPoint(edAdd(origin,edScale(direction,.75)));
     for(int n=1;n<10000;n++){snprintf(asset->name,32,"model%d",n);int found=0;for(int b=0;b<a;b++)if(!__strcmpi(asset->name,candidate->assets[b].name))found=1;char file[64];snprintf(file,sizeof(file),"%s.3do",asset->name);if(!found&&!builderNameExists(file))break;}
     if(!commit())return 0;builderAsset=a;
@@ -114,7 +130,7 @@ static EdVec builderPlacementPoint(EdVec origin,EdVec direction){
 }
 static void builderEditAsset(int asset){
     int meshes=0;for(int i=0;i<model->meshCount;i++)meshes+=model->meshes[i].asset==asset;
-    if(model->assetCount>=ED_ASSETS||model->meshCount+meshes>ED_MESHES){say("Not enough free model/mesh capacity for an editable copy.");return;}
+    if(model->assetCount>=ED_ASSETS||meshes>ED_MESHES-model->meshCount){say("Not enough free model/mesh capacity for an editable copy.");return;}
     char name[32];snprintf(name,32,"%s",model->assets[asset].name);EdVec original=model->assets[asset].origin,origin,direction;ray(&origin,&direction);
     if(!builderBegin(origin,direction))return;edCopyModel(candidate,model);EdVec offset=edSub(candidate->assets[builderAsset].origin,original);int total=candidate->meshCount;
     for(int i=0;i<total;i++)if(candidate->meshes[i].asset==asset){EdMesh *copy=&candidate->meshes[candidate->meshCount++];*copy=candidate->meshes[i];copy->asset=builderAsset;
@@ -122,9 +138,9 @@ static void builderEditAsset(int asset){
     if(commit())snprintf(builderEditingName,32,"%s",name);
 }
 static void builderLibraryMenu(void){
-    BuilderMenuState state=builderMenuBegin();char16_t names[ED_ASSETS][128];int ids[ED_ASSETS],count=0;
+    BuilderMenuState state=builderMenuBegin();std::unique_ptr<char16_t[][128]> names(new char16_t[model->assetCount][128]{});std::vector<int> ids(model->assetCount);int count=0;
     for(int a=0;a<model->assetCount;a++)if(model->assets[a].saved&&!model->assets[a].terrain){ids[count]=a;stdString_CharToWchar(names[count++],model->assets[a].name,128);}
-    int choice=chooseList(u"Custom 3DOs",names,count,0),action=-1,asset=choice>=0?ids[choice]:-1;
+    int choice=chooseList(u"Custom 3DOs",names.get(),count,0),action=-1,asset=choice>=0?ids[choice]:-1;
     if(asset>=0){char16_t options[2][128]={u"Edit 3DO",u"Delete"};action=chooseList(names[choice],options,2,0);}
     builderMenuEnd(state);if(asset<0||action<0||netEditPending())return;
     if(action==1){char file[64];snprintf(file,64,"%s.3do",model->assets[asset].name);int used=0;
@@ -165,14 +181,17 @@ static void builderControl(int fire,int grab,int middle,int shift,int ctrl){
     if(builderExitRequested){builderFinish();return;}
     if(builderAsset>=model->assetCount){builderAsset=-1;grabbing=cleaving=0;return;}
     EdVec origin,direction;ray(&origin,&direction);edMeshRay(model,builderAsset,origin,direction,tool==1,&builderHover);
+    if(textureStitchControl(builderHover,1))return;
     if(!grabbing)builderOriginGrabbing=0;
     int originHovered=builderOriginHit(origin,direction);if(originHovered)builderHover.cell=-1;
     int wheel=stdControl_aAxisStates[AXIS_MOUSE_Z];
     int alt=stdControl_ReadKey(DIK_LMENU,NULL)||stdControl_ReadKey(DIK_RMENU,NULL);
     if(tool==9){if(wheel&&alt){if(builderPrimitive==1||builderPrimitive==2)builderDetail[builderPrimitive]=(builderDetail[builderPrimitive]+(wheel>0?1:2))%3;}else if(wheel&&shift)builderSize=fmax(ED_GRID,fmin(32,builderSize+(wheel>0?ED_GRID:-ED_GRID)));else if(wheel&&ctrl)builderRotation=fmod(builderRotation+(wheel>0?5:-5)+360,360);else if(wheel)builderPrimitive=(builderPrimitive+(wheel>0?1:3))%4;if(middle){builderMenu();return;}}
-    if(tool==2){if(wheel&&paletteCount)currentMaterial=(currentMaterial+wheel%paletteCount+paletteCount)%paletteCount;if(middle){browserObjects=0;materialMenu();fireDown=grabDown=1;return;}}
+    if(tool==2){materialWheel(wheel,shift,ctrl);if(middle){browserObjects=0;materialMenu();fireDown=grabDown=1;return;}}
     int history=ctrl&&stdControl_ReadKey(DIK_Z,NULL)?(shift?2:1):ctrl&&stdControl_ReadKey(DIK_Y,NULL)?2:0;
     if(history&&!historyDown&&!grabbing){cleaving=0;historyStep(history==2);builderPicks.count=0;builderHover.cell=-1;historyDown=history;fireDown=fire;grabDown=grab;return;}historyDown=history;
+    if(tool==2&&materialDecalMode==2){if(fire&&!fireDown)say("Texture Paint paints sector faces. Use Decal mode for model faces.");fireDown=fire;grabDown=grab;return;}
+    if(tool==2&&materialDecalMode==1){if(fire&&!fireDown&&!grab&&builderHover.cell>=0)placeMaterialDecal(builderHover,1);fireDown=fire;grabDown=grab;return;}
     if(grab&&!grabDown&&originHovered){
         remember();edCopyModel(snapshot,model);builderOriginGrabbing=grabbing=1;uvMode=0;builderDelta=edV(0,0,0);
         edDragTraceBegin(&builderTrace,origin,direction,model->assets[builderAsset].origin,direction,1000);
@@ -196,7 +215,7 @@ static void builderControl(int fire,int grab,int middle,int shift,int ctrl){
         if(tool==9){EdVec center=builderPlacementPoint(origin,direction);
             remember();edCopyModel(candidate,model);if(edMeshPrimitiveTransformedDetail(candidate,builderAsset,builderPrimitive,center,currentMaterial,builderSize,builderRotation,builderDetail[builderPrimitive])&&commit())say("Primitive placed as a new mesh.");else say("Cannot add primitive: mesh/vertex limit reached.");}
         else if(tool==1){if(doubleClick)builderPicks.count=0;else if(builderHover.cell>=0){int found=-1;for(int i=0;i<builderPicks.count;i++)if(builderSameHit(builderPicks.hits[i],builderHover)){found=i;break;}if(found>=0){memmove(builderPicks.hits+found,builderPicks.hits+found+1,(--builderPicks.count-found)*sizeof(EdHit));}else if(builderPicks.count<ED_SELECTIONS)builderPicks.hits[builderPicks.count++]=builderHover;}}
-        else if(tool==2&&builderHover.cell>=0){remember();edCopyModel(candidate,model);candidate->meshes[builderHover.cell].geometry.f[builderHover.face].material=currentMaterial;commit();}
+        else if(tool==2&&builderHover.cell>=0){remember();edCopyModel(candidate,model);applyFaceMaterial(&candidate->meshes[builderHover.cell].geometry.f[builderHover.face],currentMaterial);edCompactDecals(candidate);commit();}
         else if(tool==10&&builderHover.cell>=0){builderGrab=builderHover;builderStart=builderEnd=edSnapMeshFacePoint(&model->meshes[builderGrab.cell].geometry.f[builderGrab.face],builderHover.point);cleaving=1;}
     }
     if(cleaving){const EdFace *face=&model->meshes[builderGrab.cell].geometry.f[builderGrab.face];EdVec hit;if(edTracePlane(origin,direction,builderStart,edNormal(face),&hit))builderEnd=edSnapMeshFacePoint(face,hit);

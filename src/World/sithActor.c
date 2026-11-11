@@ -1,4 +1,5 @@
 #include "sithActor.h"
+#include "Main/jkEditor.h"
 
 #include "Cog/sithCog.h"
 #include "World/sithThing.h"
@@ -86,6 +87,10 @@ flex_t sithActor_DamageActor(SithThing *pActor, SithThing *pThing, flex_t damage
     // Added: J3D asserts
     SITH_ASSERTREL(pActor && (damage > 0.0f));
     SITH_ASSERTREL(pActor->type == SITH_THING_ACTOR || pActor->type == SITH_THING_PLAYER);
+
+    // Also cover callers that bypass sithThing_DamageThing (e.g. kill binding).
+    if (pActor == sithPlayer_g_pLocalPlayerThing && jkEditor_Active())
+        return 0.0;
 
     // Added: True invincibility for the local player.
     extern int jkDev_bInvincible;

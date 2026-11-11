@@ -1146,14 +1146,12 @@ LABEL_39:
             sithControl_buttonPressDebounce = 0;
 #endif
             if (!Main_bMotsCompat) {
-                sithControl_008d7f44 = 1.0;
                 sithControl_PlayerLook(player, deltaSecs);
             }
             if ( player->type != SITH_THING_PLAYER || (player->actorParams.flags & SITH_AF_CONTROLSDISABLED) == 0 )
             {
                 // MOTS added
                 if (Main_bMotsCompat) {
-                    sithControl_008d7f44 = sithCamera_g_aCameras[sithCamera_g_pCurCamera - sithCamera_g_aCameras].rdCamera.fov * 0.01111111;
                     sithControl_PlayerLook(player, deltaSecs);
                 }
 
@@ -1374,6 +1372,13 @@ debug_controls:
 
 void sithControl_PlayerLook(SithThing *player, flex_t deltaSecs)
 {
+    /* Editor/direct spectator controls can call look before HandlePlayer ever
+       runs (notably when joining an editing host). Derive sensitivity here,
+       rather than inheriting an uninitialized or stale gameplay multiplier.
+       MovementMots also consumes this value after PlayerLook. */
+    sithControl_008d7f44 = Main_bMotsCompat && sithCamera_g_pCurCamera
+        ? sithCamera_g_pCurCamera->rdCamera.fov * 0.01111111 : 1.0;
+
     int v3; // edi
     flex_d_t v5; // st7
     flex_d_t v6; // st7

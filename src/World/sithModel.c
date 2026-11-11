@@ -4,6 +4,7 @@
 #include "Primitives/rdModel3.h"
 #include "Engine/rdroid.h"
 #include "World/sithWorld.h"
+#include "World/sithThing.h"
 #include "General/stdConffile.h"
 #include "stdPlatform.h"
 #include "jk.h"
@@ -223,13 +224,50 @@ rdModel3 *sithModel_RegisterEditor(const char *name,rdModel3 *owned){
    its hierarchy size is unchanged, so every brush tick does not consume a slot.
    Existing instances keep correctly sized joint arrays; editor transactions
    rebuild changed templates/things before rendering resumes. */
+static void sithModel_RemapEditorContacts(SithWorld *world,rdModel3 *old,rdModel3 *replacement)
+{
+    for(unsigned int i=0;i<world->numThingsLoaded;i++) {
+        SithThing *thing=&world->aThings[i];
+        if(!(thing->attach_flags&SITH_ATTACH_THINGFACE)||!thing->attachedThing
+            ||thing->attachedThing->renderData.type!=RD_THING_MODEL3
+            ||thing->attachedThing->renderData.model3!=old)continue;
+        rdFace *support=NULL;rdVector3 anchor={0};
+        for(int g=0;g<old->numGeos&&!support;g++)for(int m=0;m<old->aGeos[g].numMeshes&&!support;m++) {
+            rdMesh *mesh=&old->aGeos[g].aMeshes[m];
+            for(int f=0;f<mesh->numFaces;f++) {
+                rdFace *face=&mesh->faces[f];
+                if((rdFace*)thing->attachedSufaceInfo!=face)continue;
+                if(!replacement||g>=replacement->numGeos||m>=replacement->aGeos[g].numMeshes)break;
+                rdMesh *next=&replacement->aGeos[g].aMeshes[m];
+                if(f>=next->numFaces)break;
+                rdFace *target=&next->faces[f];
+                if(face->numVertices<3||face->numVertices!=target->numVertices
+                    ||memcmp(&face->normal,&target->normal,sizeof(rdVector3)))break;
+                int same=1;
+                for(int v=0;v<face->numVertices;v++) {
+                    int a=face->vertexPosIdx[v],b=target->vertexPosIdx[v];
+                    if(a<0||a>=mesh->numVertices||b<0||b>=next->numVertices
+                        ||memcmp(&mesh->aVertices[a],&next->aVertices[b],sizeof(rdVector3))){same=0;break;}
+                }
+                if(same){support=target;anchor=next->aVertices[target->vertexPosIdx[0]];}
+                break;
+            }
+        }
+        /* Paint/UV changes preserve contact without impact sounds or velocity
+           changes. A sculpted/deleted support must detach before its face dies. */
+        if(support){thing->attachedSufaceInfo=(sithSurfaceInfo*)support;thing->field_38=anchor;}
+        else sithThing_DetachThing(thing);
+    }
+}
 rdModel3 *sithModel_ReplaceEditor(const char *name,rdModel3 *owned){
     SithWorld *w=sithWorld_g_pCurrentWorld;rdModel3 *existing=sithModel_Find(name);
     if(!w||!w->aModels||strlen(name)>=sizeof(owned->filename))return NULL;
     if(existing && existing->numHNodes==owned->numHNodes){
+        sithModel_RemapEditorContacts(w,existing,owned);
         int id=existing->id;existing->sizeMaterials=0;rdModel3_FreeEntry(existing);
         *existing=*owned;memset(owned,0,sizeof(*owned));existing->id=id;snprintf(existing->filename,sizeof(existing->filename),"%s",name);return existing;
     }
     if(w->numModels>=w->sizeModels)return NULL;
+    if(existing)sithModel_RemapEditorContacts(w,existing,NULL);
     stdHashtbl_Remove(sithModel_hashtable,name);return sithModel_RegisterEditor(name,owned);
 }

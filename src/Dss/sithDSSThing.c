@@ -1306,7 +1306,13 @@ void sithDSSThing_Attachment(SithThing *pThing, int idTo, int outstream, int sen
         NETMSG_PUSHS32(v7->guid)
         if ( (pThing->attach_flags & SITH_ATTACH_THINGFACE) != 0 )
         {
-            NETMSG_PUSHS16(((intptr_t)pThing->attachedSufaceInfo - (intptr_t)v7->renderData.model3->aGeos[0].aMeshes->faces) / sizeof(sithSurfaceInfo));
+            int geo=0,mesh=0,face=-1;rdModel3 *model=v7->renderData.model3;
+            for(int g=0;g<model->numGeos&&face<0;g++)for(int m=0;m<model->aGeos[g].numMeshes&&face<0;m++)
+                for(int f=0;f<model->aGeos[g].aMeshes[m].numFaces;f++)if((rdFace*)pThing->attachedSufaceInfo==&model->aGeos[g].aMeshes[m].faces[f]){geo=g;mesh=m;face=f;break;}
+            NETMSG_PUSHS16(face);
+            /* Editor terrain can span many meshes. Keep the original prefix
+               for stock games; editor peers also identify the owning mesh. */
+            if(jkEditor_IsLevel()){NETMSG_PUSHS16(geo);NETMSG_PUSHS16(mesh);}
         }
         else
         {
@@ -1321,6 +1327,7 @@ void sithDSSThing_Attachment(SithThing *pThing, int idTo, int outstream, int sen
 
 int sithDSSThing_ProcessAttachment(SithMessage *pMsg)
 {    
+    if(pMsg->netMsg.msg_size<6)return 0;
     NETMSG_IN_START(pMsg);
 
     SithThing* v1 = sithThing_GetGuidThing(NETMSG_POPS32());
@@ -1329,6 +1336,7 @@ int sithDSSThing_ProcessAttachment(SithMessage *pMsg)
     int v3 = NETMSG_POPU16();
     if (v3 & SITH_ATTACH_SURFACE)
     {
+        if(pMsg->netMsg.msg_size<8)return 0;
         SithSurface* v5 = sithSurface_sub_4E63B0(NETMSG_POPS16());
         if ( v5 )
         {
@@ -1340,24 +1348,31 @@ int sithDSSThing_ProcessAttachment(SithMessage *pMsg)
     }
     if (v3 & (SITH_ATTACH_THING|SITH_ATTACH_THINGFACE))
     {
+        if(pMsg->netMsg.msg_size<10)return 0;
         SithThing* v9 = sithThing_GetGuidThing(NETMSG_POPS32());
         if ( !v9 )
             return 0;
         if (v3 & SITH_ATTACH_THINGFACE)
         {
-            int faceIndex=NETMSG_POPS16();
-            if(v9->renderData.type!=RD_THING_MODEL3||!v9->renderData.model3||!v9->renderData.model3->aGeos||!v9->renderData.model3->aGeos[0].aMeshes||faceIndex<0||faceIndex>=v9->renderData.model3->aGeos[0].aMeshes->numFaces)return 0;
+            if(pMsg->netMsg.msg_size!=12&&pMsg->netMsg.msg_size!=16)return 0;
+            int faceIndex=NETMSG_POPS16(),geo=0,mesh=0;
+            if(pMsg->netMsg.msg_size==16){geo=NETMSG_POPS16();mesh=NETMSG_POPS16();}
+            rdModel3 *model=v9->renderData.model3;
+            if(v9->renderData.type!=RD_THING_MODEL3||!model||geo<0||geo>=model->numGeos||mesh<0||mesh>=model->aGeos[geo].numMeshes)return 0;
+            rdMesh *support=&model->aGeos[geo].aMeshes[mesh];
+            if(faceIndex<0||faceIndex>=support->numFaces)return 0;
             sithThing_AttachThingToThingFace(
                 v1,
                 v9,
-                &v9->renderData.model3->aGeos[0].aMeshes->faces[faceIndex],
-                v9->renderData.model3->aGeos[0].aMeshes->aVertices,
+                &support->faces[faceIndex],
+                support->aVertices,
                 1);
             v1->attach_flags = v3;
             return 1;
         }
         else
         {
+            if(pMsg->netMsg.msg_size<22)return 0;
             sithThing_AttachThingToThing(v1, v9);
             v1->attach_flags = v3;
             v1->field_4C = NETMSG_POPVEC3();

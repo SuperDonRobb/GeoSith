@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <string>
 void edCopyModel(EdModel *out,const EdModel *source){
  if(out==source)return;EdModel copy=*source;
  copy.c.resize(copy.count);for(int s=0;s<copy.count;s++)copy.c[s].f.resize(copy.c[s].count);
@@ -15,9 +16,9 @@ void edCopyModel(EdModel *out,const EdModel *source){
  *out=std::move(copy);
 }
 int edCellsEqual(const EdCell *a,const EdCell *b){
- if(a->splineId!=b->splineId||std::memcmp(a->colormap,b->colormap,sizeof(a->colormap))||std::memcmp(a->layer,b->layer,sizeof(a->layer))||a->count!=b->count||a->ambientLight!=b->ambientLight||a->extraLight!=b->extraLight||a->flags!=b->flags||a->soundVolume!=b->soundVolume||a->tolerance!=b->tolerance||std::memcmp(&a->tint,&b->tint,sizeof(EdVec))||std::memcmp(&a->thrust,&b->thrust,sizeof(EdVec))||std::memcmp(a->sound,b->sound,32))return 0;
+ if(a->arrayId!=b->arrayId||a->splineId!=b->splineId||std::memcmp(a->colormap,b->colormap,sizeof(a->colormap))||std::memcmp(a->layer,b->layer,sizeof(a->layer))||a->count!=b->count||a->ambientLight!=b->ambientLight||a->extraLight!=b->extraLight||a->flags!=b->flags||a->soundVolume!=b->soundVolume||a->tolerance!=b->tolerance||std::memcmp(&a->tint,&b->tint,sizeof(EdVec))||std::memcmp(&a->thrust,&b->thrust,sizeof(EdVec))||std::memcmp(a->sound,b->sound,32))return 0;
  for(int f=0;f<a->count;f++){const EdFace& x=a->f[f];const EdFace& y=b->f[f];
- if(x.customUV!=y.customUV||x.count!=y.count||x.material!=y.material||x.neighbor!=y.neighbor||x.mirror!=y.mirror||x.uOffset!=y.uOffset||x.vOffset!=y.vOffset||x.uvRotation!=y.uvRotation||x.hasAttributes!=y.hasAttributes)return 0;
+ if(x.decalId!=y.decalId||x.customUV!=y.customUV||x.count!=y.count||x.material!=y.material||x.neighbor!=y.neighbor||x.mirror!=y.mirror||x.uOffset!=y.uOffset||x.vOffset!=y.vOffset||x.uvRotation!=y.uvRotation||x.hasAttributes!=y.hasAttributes)return 0;
  if(x.attributes.surfaceFlags!=y.attributes.surfaceFlags||x.attributes.faceFlags!=y.attributes.faceFlags||x.attributes.adjoinFlags!=y.attributes.adjoinFlags||x.attributes.geometryMode!=y.attributes.geometryMode||x.attributes.textureMode!=y.attributes.textureMode||x.attributes.lightingMode!=y.attributes.lightingMode||x.attributes.portal!=y.attributes.portal||x.attributes.uScale!=y.attributes.uScale||x.attributes.vScale!=y.attributes.vScale||x.attributes.extraLight!=y.attributes.extraLight||x.attributes.adjoinDistance!=y.attributes.adjoinDistance)return 0;
  for(int v=0;v<x.count;v++)if(std::memcmp(&x.v[v],&y.v[v],sizeof(EdVertex)))return 0;
  }return 1;
@@ -87,6 +88,38 @@ void edMapFace(EdFace *face) {
         v->u=(x*c+y*s)*ED_UV_SCALE/a.uScale+face->uOffset;
         v->v=(-x*s+y*c)*ED_UV_SCALE/a.vScale+face->vOffset;
     }
+}
+// Unfold the target plane around its intersection with the source plane.
+// Mapping the unfolded points preserves texture scale and phase at the seam.
+int edStitchTexture(EdFace *target,const EdFace *source){
+    if(!target||!source||target->count<3||source->count<3)return 0;
+    EdVec n=edNormal(source),t=edNormal(target),axis=edCross(t,n);
+    double sine=length(axis),cosine=edDot(t,n);EdVec anchor=source->v[0].p;
+    if(length(n)<.9||length(t)<.9||cosine<-.999999)return 0;
+    if(sine>1e-8){
+        axis=edScale(axis,1/sine);
+        EdVec inPlane=edSub(t,edScale(n,cosine));
+        anchor=edAdd(anchor,edScale(inPlane,edDot(t,edSub(target->v[0].p,anchor))/edDot(inPlane,inPlane)));
+    }
+    // Use actual stored UVs, including imported/custom mappings. Cleaved
+    // polygons may start with three collinear corners, so find a valid basis.
+    int b=-1,c=-1;EdVec aVec={},bVec={};double aa=0,ab=0,bb=0,det=0;
+    for(int i=1;i<source->count&&b<0;i++)for(int j=i+1;j<source->count;j++){
+        aVec=edSub(source->v[i].p,source->v[0].p);bVec=edSub(source->v[j].p,source->v[0].p);
+        aa=edDot(aVec,aVec);ab=edDot(aVec,bVec);bb=edDot(bVec,bVec);det=aa*bb-ab*ab;
+        if(det>1e-20){b=i;c=j;break;}
+    }
+    if(b<0)return 0;
+    EdFace result=*target;
+    for(int v=0;v<result.count;v++){
+        EdVec point=result.v[v].p;
+        if(sine>1e-8){EdVec q=edSub(point,anchor);point=edAdd(anchor,edAdd(edAdd(edScale(q,cosine),edScale(edCross(axis,q),sine)),edScale(axis,edDot(axis,q)*(1-cosine))));}
+        EdVec q=edSub(point,source->v[0].p);double x=(edDot(q,aVec)*bb-edDot(q,bVec)*ab)/det,y=(edDot(q,bVec)*aa-edDot(q,aVec)*ab)/det;
+        result.v[v].u=source->v[0].u+x*(source->v[b].u-source->v[0].u)+y*(source->v[c].u-source->v[0].u);
+        result.v[v].v=source->v[0].v+x*(source->v[b].v-source->v[0].v)+y*(source->v[c].v-source->v[0].v);
+        if(!isfinite(result.v[v].u)||!isfinite(result.v[v].v))return 0;
+    }
+    result.customUV=1;result.uOffset=result.vOffset=result.uvRotation=0;*target=result;return 1;
 }
 void edMapWorld(EdModel *m) {for(int s=0;s<m->count;s++)for(int f=0;f<m->c[s].count;f++){EdFace *face=&m->c[s].f[f];if(face->hasAttributes)face->attributes=edSurfaceAttributes(face);edMapFace(face);}}
 void edShiftFaceUV(EdFace *face,EdVec movement) {
@@ -356,7 +389,12 @@ static int cellclip(const EdCell *in,EdVec n,double d,EdCell *out) {
         }
     }
     /* An unchanged face on the clipping plane is already a cap. */
-    for(int i=0;i<out->count;i++) if(edDot(edNormal(&out->f[i]),n)>.99999 && fabs(edDot(n,out->f[i].v[0].p)-d)<ED_EPS) return 1;
+    for(int i=0;i<out->count;i++)if(edDot(edNormal(&out->f[i]),n)>.99999){
+        // One corner on the plane does not make a tilted face a cap. Skipping
+        // the new cap in that case leaves the clipped half of a sector open.
+        bool coplanar=true;for(int v=0;v<out->f[i].count;v++)if(fabs(edDot(n,out->f[i].v[v].p)-d)>=ED_EPS){coplanar=false;break;}
+        if(coplanar)return 1;
+    }
     if(!capHull(&cap,points,count,n))return 0;
     if(cap.count>=3) {
         if(cap.hasAttributes)cap.attributes.surfaceFlags=(cap.attributes.surfaceFlags&~1u)|(n.z>.5?1u:0u);
@@ -388,7 +426,7 @@ static int edResourceText(const char *text,size_t capacity){
     const char *end=(const char*)memchr(text,0,capacity);if(!end)return 0;for(const char *p=text;p<end;p++)if(!((*p>='a'&&*p<='z')||(*p>='A'&&*p<='Z')||(*p>='0'&&*p<='9')||*p=='_'||*p=='-'||*p=='.'||*p=='+'))return 0;return 1;
 }
 int edValidate(const EdModel *m) {
-    if(!edSplineValidate(m))return 0;
+    if(!edSplineValidate(m)||!edGroupsValidate(m))return 0;
     if(!edMeshValidate(m)){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
     if(m->count<1||m->count>ED_CELLS) {if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
     if(m->objectCount<0||m->objectCount>ED_OBJECTS||m->spawnCount<0||m->spawnCount>ED_SPAWNS){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
@@ -423,7 +461,7 @@ int edValidate(const EdModel *m) {
                 if(edDot(edCross(a,b),n)<-fmax(ED_EPS,c->tolerance*(length(a)+length(b)))) {if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
             }
         }
-        if(!closedCell(c)){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
+        if(!closedCell(c)){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation open sector %d faces %d\n",s,c->count);return 0;}
     } return 1;
 }
 static int rayFaces(const EdModel *m,EdVec o,EdVec d,EdHit *h,int includeAdjoins) {
@@ -1270,8 +1308,13 @@ void edSelectionRemap(const EdModel *from,const EdModel *to,const EdSelection *s
 }
 #include "edMesh.h"
 
-unsigned int edCellHash(const EdCell *c){EdWire measure={NULL,ED_NET_LIMIT/2,0,0,1};edWireCell(&measure,(EdCell*)c);if(!measure.ok)return 0;std::vector<unsigned char> bytes(measure.at);EdWire w={bytes.data(),bytes.size(),0,0,1};edWireCell(&w,(EdCell*)c);return w.ok?edNetHash(bytes.data(),(uint32_t)bytes.size()):0;}
+unsigned int edCellHash(const EdCell *c){EdWire measure={NULL,ED_NET_LIMIT/2,0,0,1};edWireCell(&measure,(EdCell*)c);if(!measure.ok)return 0;std::vector<unsigned char> bytes(measure.at);EdWire w={bytes.data(),bytes.size(),0,0,1};edWireCell(&w,(EdCell*)c);unsigned int hash=w.ok?edNetHash(bytes.data(),(uint32_t)bytes.size()):0;for(int f=0;f<c->count;f++)if(c->f[f].decalId)hash=(hash^(unsigned int)c->f[f].decalId)*16777619u;return hash;}
 
+#include "edGroups.h"
 #include "edSpline.h"
 
 #include "edTerrain.h"
+
+#include "edTerrainPaint.h"
+
+#include "edDecal.h"

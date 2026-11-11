@@ -66,9 +66,36 @@ try {
         } else { Start-Sleep -Milliseconds 600 }
     }
     foreach ($process in $processes) { if (-not $process.WaitForExit($TimeoutSeconds * 1000)) { throw "Network test timed out. See $testRoot" } }
-    if($Level){
+    if($env:GEOSITH_NET_EDITOR_LOOK_TEST){
+        foreach($role in 1..3){if($processes[$role-1].ExitCode -ne 0 -or !(Select-String -LiteralPath (Join-Path $testRoot "$role.stdout.log") -Pattern 'GEOSITH_NET_EDITOR_LOOK PASS' -Quiet)){throw "Editor join look test failed: $testRoot"}}
+        Write-Host "PASS: both joining clients can look up/down while host stays editing. Logs: $testRoot"
+        return
+    }
+    if($env:GEOSITH_NET_SURFACE_SESSION_TEST){
+        foreach($role in 1..3){if($processes[$role-1].ExitCode -ne 0 -or !(Select-String -LiteralPath (Join-Path $testRoot "$role.stdout.log") -Pattern 'GEOSITH_NET_SURFACE_SESSION PASS' -Quiet)){throw "Surface session test failed: $testRoot"}}
+        foreach($prefix in @('surface.shared','surface.undo','surface.hostshared')){if(@(1..3 | ForEach-Object {Get-Content -LiteralPath (Join-Path $testRoot "$prefix$_") -Raw} | Select-Object -Unique).Count -ne 1){throw "Surface session contents differ: $testRoot"}}
+        Write-Host "PASS: surface leases, deferred paint, concurrent edits, single shared undo. Logs: $testRoot"
+        return
+    }
+    if($env:GEOSITH_NET_TERRAIN_SESSION_TEST){
+        foreach($role in 1..3){if($processes[$role-1].ExitCode -ne 0 -or !(Select-String -LiteralPath (Join-Path $testRoot "$role.stdout.log") -Pattern 'GEOSITH_NET_TERRAIN_SESSION PASS' -Quiet)){throw "Terrain session test failed: $testRoot"}}
+        foreach($prefix in @('terrain.shared','terrain.undo','terrain.hostshared')){if(@(1..3 | ForEach-Object {Get-Content -LiteralPath (Join-Path $testRoot "$prefix$_") -Raw} | Select-Object -Unique).Count -ne 1){throw "Terrain session contents differ: $testRoot"}}
+        Write-Host "PASS: terrain leases, deferred sculpt/paint, concurrent edits, single shared undo. Logs: $testRoot"
+        return
+    }
+    if($Level -and -not $env:GEOSITH_NET_CLIENT_DECAL_TEST){
         foreach($role in 1..3){if($processes[$role-1].ExitCode -ne 0 -or -not (Select-String -LiteralPath (Join-Path $testRoot "$role.stdout.log") -Pattern 'GEOSITH_NET_LOADED PASS' -SimpleMatch -Quiet)){throw "Saved-level join failed: $testRoot"}}
         Write-Host "PASS: $Level host and two clients, host visibility after welcome. Logs: $testRoot"
+        return
+    }
+    if($env:GEOSITH_NET_CLIENT_DECAL_TEST){
+        if(-not (Select-String -LiteralPath (Join-Path $testRoot '2.stdout.log') -Pattern 'GEOSITH_NET_CLIENT_DECAL_DELTA PASS' -SimpleMatch -Quiet)){throw "First client decal did not use a shared snapshot delta: $testRoot"}
+        foreach($role in 1..3){if($processes[$role-1].ExitCode -ne 0 -or !(Select-String -LiteralPath (Join-Path $testRoot "$role.stdout.log") -Pattern 'GEOSITH_NET_CLIENT_DECAL PASS' -Quiet)){throw "Client decal test failed: $testRoot"}}
+        foreach($prefix in @('decal.seen','decal.redo','decal.host')){
+            $hashes=@(1..3 | ForEach-Object {Get-Content -LiteralPath (Join-Path $testRoot "$prefix$_") -Raw} | Select-Object -Unique)
+            if($hashes.Count -ne 1){throw "Decal contents differ between peers: $testRoot"}
+        }
+        Write-Host "PASS: client and host decals, matching pixels/documents, shared undo/redo. Logs: $testRoot"
         return
     }
     foreach ($role in 1..3) {

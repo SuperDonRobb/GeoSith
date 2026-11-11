@@ -18,6 +18,8 @@
 int rdroid_bSoftwareRenderer = 0;
 #endif
 
+int rdroid_editorTerrainRed;
+
 int rdStartup(HostServices *p_hs)
 {
     stdPlatform_Printf("OpenJKDF2: %s\n", __func__);

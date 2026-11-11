@@ -61,7 +61,7 @@ static int readPlacedCogs(EdModel *m,const char *text){
     ownedCogCount=m->cogCount;for(int i=0;i<ownedCogCount;i++)ownedCogSlots[i]=i;return 1;
 }
 static int cogPicking(void){return cogDraft&&cogPickParam>=0;}
-int jkEditor_HandleEscape(void){if(active&&builderAsset>=0){builderExitRequested=1;return 1;}if(active&&mapActive){mapEscape();return 1;}if(active&&cogPicking()){cogPickCancelled=1;return 1;}return 0;}
+int jkEditor_HandleEscape(void){if(active&&terrainSessionOpen()){terrainSessionFinish();return 1;}if(active&&builderAsset>=0){builderExitRequested=1;return 1;}if(active&&mapActive){int editing=splineDrawing||splineDragging||mapCleaveMode||mapDrawing||mapUnplaced||mapDragging||mapBox;if(editing)mapEscape();return editing?1:0;}if(active&&cogPicking()){cogPickCancelled=1;return 1;}return 0;}
 static EdCogParam *pickingCogParam(void){return cogPicking()&&cogSelected<cogDraft->count&&cogPickParam<cogDraft->cogs[cogSelected].count?&cogDraft->cogs[cogSelected].params[cogPickParam]:NULL;}
 static void updateCogPick(EdVec origin,EdVec direction){EdCogParam *param=pickingCogParam();cogPickThing=-10000;cogPickHit.cell=-1;if(!param)return;
     if(param->type==ED_COG_SURFACE||param->type==ED_COG_SECTOR)edRaySelection(model,origin,direction,&cogPickHit);else edRayMaterial(model,origin,direction,&cogPickHit);

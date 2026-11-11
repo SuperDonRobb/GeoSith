@@ -3,6 +3,7 @@
 extern "C" {
 #include "Gui/jkGUIMultiplayer.h"
 #include "Dss/sithDSSThing.h"
+#include "Dss/jkDSS.h"
 #include "Devices/sithSoundMixer.h"
 extern char jkGuiMultiplayer_ipText_conv[256];
 extern int jkGuiNetHost_portNum;
@@ -63,11 +64,13 @@ static int netTestMarker(const char *name){char path[512];netTestPath(path,name)
 static void netTestMark(const char *name,uint32_t value){char path[512],temp[520];netTestPath(path,name);if(netTestMarker(name))return;snprintf(temp,sizeof(temp),"%s.tmp",path);FILE *f=fopen(temp,"wb");if(!f)exit(2);fprintf(f,"%u\n",value);fclose(f);if(rename(temp,path))exit(2);}
 static int netTestTransmit(int player,const SithMessage *m){
     static uint32_t droppedProposal;EditorNetHeader h={0};if(m->netMsg.msg_size>=sizeof(h))edCopy(&h,m->pktData,sizeof(h));EditorNetPeer *peer=netPeer(player,0);
-    if(netTestRole==1&&h.kind==EN_ACK&&peer&&peer->rx.h.kind==EN_EDIT&&h.offset==peer->rx.h.total){
+    if(netTestRole==1&&h.kind==EN_ACK&&peer&&(peer->rx.h.kind==EN_EDIT||peer->rx.h.kind==EN_TERRAIN_EDIT)&&h.offset==peer->rx.h.total){
         if(!droppedProposal){droppedProposal=h.id;printf("GEOSITH_NET_TEST: deliberately dropping final proposal ACK and retries\n");}
         if(h.id==droppedProposal)return 1;
     }
-    int n=++netTestPackets;if(n%19==3)return 1;int sent=stdComm_SendToPlayer((SithMessage*)m,player);if(sent&&n%13==7)stdComm_SendToPlayer((SithMessage*)m,player);return sent;}
+    int n=++netTestPackets;int faultInjection=!getenv("GEOSITH_NET_NO_DROP");if(faultInjection&&n%19==3)return 1;int sent=stdComm_SendToPlayer((SithMessage*)m,player);if(faultInjection&&sent&&n%13==7)stdComm_SendToPlayer((SithMessage*)m,player);return sent;}
+#include "jkEditorTerrainNetTest.h"
+#include "jkEditorSurfaceNetTest.h"
 static int stressNetwork(SithThing *player){
     if(!getenv("GEOSITH_NET_DIR"))exit(2);
     sithNet_isMulti=1;sithMessage_g_outputstream|=1;sithMessage_g_inputstream|=1;
@@ -89,7 +92,9 @@ static int stressNetwork(SithThing *player){
             remember();edCopyModel(candidate,model);edRotateFaceTexture(&candidate->c[0].f[0],37,edV(0,0,0));edRotateFaceTexture(&candidate->meshes[0].geometry.f[0],23,edV(0,0,.5));if(!commit())exit(2);
             /* Static GUIDs need not equal local allocation slots after a join. */
             jkPlayer_playerInfos[0].pLocalPlayer->guid=100001;jkPlayer_playerInfos[1].pLocalPlayer->guid=100000;sithWorld_g_pCurrentWorld->aThings[objectThings[0]].guid=1;
-            }grabbing=objectGrabbing=1;char bootstrap[32]="";if(!jkEditor_NetPrepareJoin(bootstrap,sithWorld_g_pCurrentWorld->map_jkl_fname,JKEDITOR_NET_FLAG))exit(2);char path[512];netTestPath(path,"bootstrap.name");FILE *f=fopen(path,"wb");if(!f)exit(2);fprintf(f,"%s",bootstrap);fclose(f);netTestMark("host.ready",netRevision);
+            }
+            if(getenv("GEOSITH_NET_TERRAIN_SESSION_TEST")){for(int f=0;f<model->c[0].count;f++)if(model->c[0].f[f].neighbor<0&&edNormal(&model->c[0].f[f]).z>.9){picks.count=1;picks.hits[0]={0,f,-1,-1};if(!terrainCreate())exit(2);break;}}
+            jkDSS_SendSaberInfo_alt(player,(char*)"kyb3.3do",(char*)"kymp4.snd",(char*)"saberblue1.mat",(char*)"saberblue0.mat");grabbing=objectGrabbing=1;char bootstrap[32]="";if(!jkEditor_NetPrepareJoin(bootstrap,sithWorld_g_pCurrentWorld->map_jkl_fname,JKEDITOR_NET_FLAG))exit(2);char path[512];netTestPath(path,"bootstrap.name");FILE *f=fopen(path,"wb");if(!f)exit(2);fprintf(f,"%s",bootstrap);fclose(f);netTestMark("host.ready",netRevision);
         }else{if(!stdComm_GNS_TestDiscovery())exit(2);snprintf(jkGuiMultiplayer_ipText_conv,256,"127.0.0.1:27020");if(stdComm_Open(0,u"geosith-network-test"))exit(2);sithMulti_StartupClient();sithNet_serverNetId=0;
             /* The connection screen has no local player until DSS_WELCOME.
                Use the real join request, dispatcher and welcome handler. */
@@ -104,13 +109,13 @@ static int stressNetwork(SithThing *player){
             }
             while(g_submodeFlags&8){uint32_t now=stdPlatform_GetTimeMsec();
                 if(getenv("GEOSITH_NET_EXPECT_SECTORS")){static uint32_t progress; if(now-progress>5000){progress=now;EditorNetPeer *p=netPeer(sithNet_serverNetId,0);printf("LARGE JOIN role=%d ready=%d rx=%u/%u\n",netTestRole,netReady,p?p->rx.at:0,p?p->rx.h.total:0);fflush(stdout);}}
-                if(now-netTestStart>(getenv("GEOSITH_NET_EXPECT_SECTORS")?120000u:45000u)){printf("GEOSITH_NET_JOIN FAIL: welcome timeout role %d ready %d server %d\n",netTestRole,netReady,sithNet_serverNetId);fflush(stdout);exit(2);}
+                if(now-netTestStart>(getenv("GEOSITH_NET_TIMEOUT_MS")?(uint32_t)atoi(getenv("GEOSITH_NET_TIMEOUT_MS")):(getenv("GEOSITH_NET_EXPECT_SECTORS")?120000u:45000u))){printf("GEOSITH_NET_JOIN FAIL: welcome timeout role %d ready %d server %d\n",netTestRole,netReady,sithNet_serverNetId);fflush(stdout);exit(2);}
                 if(now-netTestJoinTime>500){netTestJoinTime=now;if(!sithMulti_SendJoinRequest(sithNet_serverNetId))exit(2);}
                 sithMessage_ProcessMessages();
             }
             if(!getenv("GEOSITH_NET_LEVEL")){if(fabs(model->c[0].f[0].uvRotation-37)>.001||fabs(model->meshes[0].geometry.f[0].uvRotation-23)>.001)exit(2);printf("GEOSITH_NET_TEXTURE_ROTATION PASS: world and model texture rotation synchronized\n");}
             if(!netReady||!sithWorld_g_pCurrentWorld->pLocalPlayer||sithMulti_quitGameState==2)exit(2);
-            SithThing *custom=sithTemplate_GetTemplate("network_template");if(!getenv("GEOSITH_NET_LEVEL")&&(model->templateCount!=1||!custom||custom->renderData.type!=RD_THING_MODEL3||!custom->renderData.model3||objectThings[0]<0))exit(2);
+            SithThing *custom=sithTemplate_GetTemplate("network_template");if(!getenv("GEOSITH_NET_LEVEL")&&((!getenv("GEOSITH_NET_TERRAIN_SESSION_TEST")&&model->templateCount!=1)||!custom||custom->renderData.type!=RD_THING_MODEL3||!custom->renderData.model3||objectThings[0]<0))exit(2);
             if(getenv("GEOSITH_CUSTOM_RESOURCES_TEST")){
                 if(customResources.files.size()!=3||!customMaterial("zz_net_custom.mat"))exit(2);
                 int material=addMaterialName("zz_net_custom.mat");if(material<0||!editorMaterial(material))exit(2);
@@ -130,11 +135,95 @@ static int stressNetwork(SithThing *player){
             printf("GEOSITH_NET_VISIBILITY: role=%d guid=%d flags=%x geo=%d sector=%d model=%p\n",netTestRole,hostBody->guid,hostBody->flags,hostBody->renderData.curGeoMode,hostBody->sector?hostBody->sector->id:-1,(void*)hostBody->renderData.model3);fflush(stdout);
             if((hostBody->flags&SITH_TF_DISABLED)||!hostBody->renderData.curGeoMode||!hostBody->renderData.model3||!hostBody->sector){puts("GEOSITH_NET_VISIBILITY FAIL: host is hidden after welcome");fflush(stdout);exit(2);}
         }
+        if(netTestRole!=1){jkPlayer_Startup();jkPlayer_InitSaber();jkDSS_SendSaberInfo_alt(sithWorld_g_pCurrentWorld->pLocalPlayer,(char*)"kyb3.3do",(char*)"kymp4.snd",(char*)"saberblue1.mat",(char*)"saberblue0.mat");}
         printf("NETTEST role %d initialized\n",netTestRole);fflush(stdout);
     }
     sithNet_isServer=netTestRole==1;if(netTestRole==1)sithNet_serverNetId=1;
     if(netTestRole==1){int oldLevel=jkMain_bLevelActive,oldModal=jkMain_bInModalGui;jkMain_bLevelActive=1;jkMain_bInModalGui=1;jkMain_NetworkTick();jkMain_bInModalGui=oldModal;jkMain_bLevelActive=oldLevel;}else sithMessage_ProcessMessages();
+    if(getenv("GEOSITH_NET_EDITOR_LOOK_TEST")){
+        static int checked;
+        if(!checked){
+            if(!active)exit(2);
+            if(netTestRole!=1){netControlReady(sithWorld_g_pCurrentWorld->pLocalPlayer);if(!editorLookSelfTest(sithWorld_g_pCurrentWorld->pLocalPlayer))exit(2);}
+            char marker[32];snprintf(marker,32,"look.ready%d",netTestRole);netTestMark(marker,1);checked=1;
+        }
+        if(netTestMarker("look.ready1")&&netTestMarker("look.ready2")&&netTestMarker("look.ready3")){puts("GEOSITH_NET_EDITOR_LOOK PASS: host remains editing, client up/down look works immediately after welcome");fflush(stdout);exit(0);}
+        if(stdPlatform_GetTimeMsec()-netTestStart>90000)exit(2);
+        sithNet_isMulti=0;sithMessage_g_outputstream&=~1;sithMessage_g_inputstream&=~1;return 1;
+    }
+    if(getenv("GEOSITH_NET_SURFACE_SESSION_TEST"))return stressSurfaceSession();
+    if(getenv("GEOSITH_NET_TERRAIN_SESSION_TEST"))return stressTerrainSession();
+    if(getenv("GEOSITH_NET_CLIENT_DECAL_TEST")){
+        static int phase, baseline=-1;
+        if(baseline<0&&(netTestRole==1||netReady))baseline=model->decalCount;
+        auto decalHit=[](int skip){EdHit hit={};hit.cell=-1;hit.vertex=hit.edge=-1;for(int c=0;c<model->count;c++)for(int f=0;f<model->c[c].count;f++){const EdFace &face=model->c[c].f[f];if(face.neighbor>=0||face.decalId)continue;if(skip-- >0)continue;hit.cell=c;hit.face=f;hit.point=edV(0,0,0);for(int v=0;v<face.count;v++)hit.point=edAdd(hit.point,face.v[v].p);hit.point=edScale(hit.point,1.0/face.count);return hit;}return hit;};EditorNetPeer *a=netPeer(2,0),*b=netPeer(3,0);
+        if(netTestRole==1&&a&&b&&a->ready==(int)netRevision&&b->ready==(int)netRevision)netTestMark("decals.ready",1);
+        if(netTestRole==2&&netReady&&!netEditPending()&&netTestMarker("decals.ready")){
+            if(!phase){EdHit hit=decalHit(0);if(hit.cell<0)exit(2);currentMaterial=addMaterialName("dflt.mat");if(!placeMaterialDecal(hit,0))exit(2);phase=1;}
+            else if(phase==1&&netTestMarker("decal.seen1")&&netTestMarker("decal.seen2")&&netTestMarker("decal.seen3")){if(!historyStep(0))exit(2);phase=2;}
+            else if(phase==2&&netTestMarker("decal.undo1")&&netTestMarker("decal.undo2")&&netTestMarker("decal.undo3")){if(!historyStep(1))exit(2);phase=3;}
+        }
+        if(netTestRole==2&&phase==1){static int checked;EditorNetPeer *peer=netPeer(sithNet_serverNetId,0);if(!checked&&peer&&peer->tx.bytes){
+            char status[192];if(!peer->tx.h.base||!netEditStatus(status,sizeof(status))||!strstr(status,"Sending edit"))exit(2);
+            printf("GEOSITH_NET_CLIENT_DECAL_DELTA PASS: first proposal raw=%u packed=%u base=%u\n",peer->tx.h.raw,peer->tx.h.total,peer->tx.h.base);fflush(stdout);checked=1;
+        }}
+        if((netTestRole==1||netReady)&&!netEditPending()){
+            char name[32];
+            if(model->decalCount==baseline+1){
+                int found=0;for(int c=0;c<model->count;c++)for(int f=0;f<model->c[c].count;f++)if(model->c[c].f[f].decalId){rdMaterial *mat=editorFaceMaterial(model,&model->c[c].f[f]);if(!mat||sithWorld_g_pCurrentWorld->aSectors[c].surfaces[f].surfaceInfo.face.material!=mat)exit(2);found++;}if(!found)exit(2);
+                snprintf(name,32,netTestMarker("decal.undo1")&&netTestMarker("decal.undo2")&&netTestMarker("decal.undo3")?"decal.redo%d":"decal.seen%d",netTestRole);netTestMark(name,edNetHash(model->decals[baseline].data->data(),(uint32_t)model->decals[baseline].data->size()));
+            }else if(model->decalCount==baseline&&netTestMarker("decal.seen1")&&netTestMarker("decal.seen2")&&netTestMarker("decal.seen3")){snprintf(name,32,"decal.undo%d",netTestRole);netTestMark(name,1);}
+        }
+        if(netTestRole==1&&!phase&&netTestMarker("decal.redo1")&&netTestMarker("decal.redo2")&&netTestMarker("decal.redo3")){
+            EdHit hit=decalHit(0);if(hit.cell<0)exit(2);currentMaterial=addMaterialName("dflt.mat");if(!placeMaterialDecal(hit,0))exit(2);phase=1;
+        }
+        if(model->decalCount==baseline+2&&(netTestRole==1||netReady)&&!netEditPending()){
+            char name[32];snprintf(name,32,"decal.host%d",netTestRole);netTestMark(name,netTestModelHash());
+            if(netTestMarker("decal.host1")&&netTestMarker("decal.host2")&&netTestMarker("decal.host3")){puts("GEOSITH_NET_CLIENT_DECAL PASS: client placement, live host/peer material, shared undo/redo and host placement");fflush(stdout);exit(0);}
+        }
+        if(stdPlatform_GetTimeMsec()-netTestStart>(getenv("GEOSITH_NET_TIMEOUT_MS")?(unsigned)atoi(getenv("GEOSITH_NET_TIMEOUT_MS")):90000)){printf("GEOSITH_NET_CLIENT_DECAL FAIL role=%d decals=%d ready=%d busy=%d phase=%d rejections=%u\n",netTestRole,model->decalCount,netReady,netBusy,phase,netRejections);fflush(stdout);exit(2);}
+        sithNet_isMulti=0;sithMessage_g_outputstream&=~1;sithMessage_g_inputstream&=~1;return 1;
+    }
     if(getenv("GEOSITH_NET_LEVEL")){
+        if(getenv("GEOSITH_NET_ARRAY_TEST")){
+            if(model->groupCount!=1||strcmp(model->groups[0].name,"Hallway Module")||model->splineCount!=1||model->splines[0].groupId!=1)exit(2);
+            char ready[32];snprintf(ready,sizeof(ready),"array.ready%d",netTestRole);netTestMark(ready,1);jkEditor_NetTick();
+            if(netTestRole==1&&!netTestMarker("array.changed")){
+                EditorNetPeer *a=netPeer(2,0),*b=netPeer(3,0);if(!netTestMarker("array.ready2")||!netTestMarker("array.ready3")||!a||!b||a->ready!=(int)netRevision||b->ready!=(int)netRevision)return 1;
+                EdModel updated;EdSpline spline=model->splines[0];spline.points[1].position.x=8.25;
+                if(!edGroupArray(&updated,model,1,2,2)||!edSplineRebuild(candidate,&updated,&spline))exit(2);
+                remember();if(!commit()||!historyStep(0)||model->groups[0].copies!=3||!historyStep(1)||model->groups[0].copies!=2)exit(2);
+                netTestMark("array.changed",netRevision);
+            }
+            if(!netTestMarker("array.changed")||model->groups[0].copies!=2||fabs(model->splines[0].points[1].position.x-8.25)>.001)return 1;
+            puts("GEOSITH_NET_ARRAY PASS: saved groups, array regeneration, bent spline and undo/redo synchronized");fflush(stdout);
+        }
+        if(getenv("GEOSITH_NET_DECAL_TEST")){
+            char ready[32];snprintf(ready,sizeof(ready),"decal.ready%d",netTestRole);netTestMark(ready,1);jkEditor_NetTick();
+            if(netTestRole==1&&!netTestMarker("decal.changed")){
+                EditorNetPeer *a=netPeer(2,0),*b=netPeer(3,0);if(!netTestMarker("decal.ready2")||!netTestMarker("decal.ready3")||!a||!b||a->ready!=(int)netRevision||b->ready!=(int)netRevision)return 1;
+                EdHit hit;if(!edRay(model,edV(0,0,.5),edV(0,1,0),&hit))exit(2);EdPaintImage base,decal;decal.width=decal.height=1;decal.rgba={255,32,32,255};
+                if(!terrainLoadImage(paletteNames[model->c[hit.cell].f[hit.face].material],&base))exit(2);
+                remember();edCopyModel(candidate,model);if(!edPlaceDecal(candidate,&candidate->c[hit.cell].f[hit.face],hit.point,.4,&base,&decal,getenv("GEOSITH_NET_SURFACE_PAINT_TEST")?.5:0)||!commit())exit(2);
+                if(!historyStep(0)||!historyStep(1)||!model->decalCount)exit(2);
+                netTestMark("decal.changed",edNetHash(model->decals[0].data->data(),(unsigned)model->decals[0].data->size()));
+            }
+            char path[512];netTestPath(path,"decal.changed");FILE *f=fopen(path,"rb");unsigned hash=0;if(f){fscanf(f,"%u",&hash);fclose(f);}if(!hash||!model->decalCount||edNetHash(model->decals[0].data->data(),(unsigned)model->decals[0].data->size())!=hash)return 1;
+            int visible=0;for(int c=0;c<model->count;c++)for(int face=0;face<model->c[c].count;face++)if(model->c[c].f[face].decalId){if(!editorFaceMaterial(model,&model->c[c].f[face]))exit(2);visible++;}if(!visible)exit(2);
+            puts("GEOSITH_NET_DECAL PASS: baked texture, surface UVs, undo and redo synchronized");fflush(stdout);
+        }
+        if(getenv("GEOSITH_NET_PAINT_TEST")){
+            if(!edPainted(model,0))exit(2);char ready[32];snprintf(ready,sizeof(ready),"paint.ready%d",netTestRole);netTestMark(ready,1);jkEditor_NetTick();
+            if(netTestRole==1&&!netTestMarker("paint.changed")){
+                EditorNetPeer *a=netPeer(2,0),*b=netPeer(3,0);if(!netTestMarker("paint.ready2")||!netTestMarker("paint.ready3")||!a||!b||a->ready!=(int)netRevision||b->ready!=(int)netRevision)return 1;
+                unsigned before=edPaintHash(model,0);remember();edCopyModel(candidate,model);
+                if(!edTerrainPaint(candidate,0,edV(0,0,.002),.75,.8,"dflt.mat",terrainMaterialName)||!commit()||edPaintHash(model,0)==before)exit(2);
+                unsigned after=edPaintHash(model,0);if(!historyStep(0)||edPaintHash(model,0)!=before||!historyStep(1)||edPaintHash(model,0)!=after)exit(2);
+                netTestMark("paint.changed",after);
+            }
+            char path[512];netTestPath(path,"paint.changed");FILE *f=fopen(path,"rb");unsigned hash=0;if(f){fscanf(f,"%u",&hash);fclose(f);}if(!hash||edPaintHash(model,0)!=hash)return 1;
+            puts("GEOSITH_NET_PAINT PASS: vertex layers, painting, undo and redo synchronized");fflush(stdout);
+        }
         if(getenv("GEOSITH_NET_EXPECT_SECTORS")){
             /* This long-running harness bypasses normal gameplay transmission. */
             if(netTestRole!=1){static uint32_t heartbeat;uint32_t now=stdPlatform_GetTimeMsec();if(now-heartbeat>=1000){heartbeat=now;sithMulti_Ping(sithNet_serverNetId);}}
@@ -293,6 +382,7 @@ static int stressNetwork(SithThing *player){
         printf("GEOSITH_NET_ENEMY_RESET PASS: role %d survived kill, host reset, client reset and host resuming fire\n",netTestRole);fflush(stdout);
     }
     final=enemyPresent&&netTestMarker("enemy.cycle2.ok")&&netTestMarker("enemy.cycle3.ok");
+    if(final){static int checked; if(!checked){int activePlayers=0;for(unsigned int i=0;i<jkPlayer_maxPlayers;i++)if(jkPlayer_playerInfos[i].flags&1){activePlayers++;SithThing *body=jkPlayer_playerInfos[i].pLocalPlayer;if(!body||!body->renderData.model3||strcmp(body->renderData.model3->filename,"kyb3.3do")){printf("GEOSITH_NET_SKIN FAIL: role %d slot %u model %s\n",netTestRole,i,body&&body->renderData.model3?body->renderData.model3->filename:"missing");fflush(stdout);exit(2);}}if(activePlayers!=3){printf("GEOSITH_NET_ROSTER FAIL: role %d active players %d\n",netTestRole,activePlayers);fflush(stdout);exit(2);}checked=1;puts("GEOSITH_NET_SKIN PASS: selected Krugon models survive join and edits on every peer");fflush(stdout);}}
     if(final&&netTestRole==1){
         static uint32_t lastSound;uint32_t now=stdPlatform_GetTimeMsec();
         if(now-lastSound>250){lastSound=now;sithSound *loaded=sithSound_Load("walkmetaldry02.wav",0);if(!loaded)exit(2);
@@ -305,10 +395,10 @@ static int stressNetwork(SithThing *player){
             }
         }
     }
-    if(final&&netTestRole==1&&stdPlatform_GetTimeMsec()-netTestPositionTime>100){netTestPositionTime=stdPlatform_GetTimeMsec();SithThing *body=jkPlayer_playerInfos[0].pLocalPlayer;body->position.x=.75;body->physicsParams.vel.x=0;sithDSSThing_Pos(body,2,0);sithDSSThing_Pos(body,3,0);}
+    if(final&&netTestRole==1&&stdPlatform_GetTimeMsec()-netTestPositionTime>100){netTestPositionTime=stdPlatform_GetTimeMsec();SithThing *body=jkPlayer_playerInfos[0].pLocalPlayer;body->position.x=.75;body->physicsParams.vel.x=0;sithDSSThing_Pos(body,-1,0);}
     if(final&&netTestRole==1){EditorNetPeer *a=netPeer(2,0),*b=netPeer(3,0);if(a&&b&&a->ready==(int)netRevision&&b->ready==(int)netRevision)netTestMark("host.hash",netTestModelHash());}
     if(final&&netTestRole!=1&&netTestSoundMask==15&&netTestMarker("host.hash")&&jkPlayer_playerInfos[0].pLocalPlayer&&fabs(jkPlayer_playerInfos[0].pLocalPlayer->position.x-.75)<.001){printf("GEOSITH_NET_SOUND PASS: weapon/global/attached/positional sounds resolved by filename despite conflicting indices\n");printf("GEOSITH_NET_POSITION PASS: remote host movement replicated over sequenced unreliable packets\n");char path[512];netTestPath(path,"host.hash");FILE *f=fopen(path,"rb");unsigned int hash=0;if(!f||fscanf(f,"%u",&hash)!=1)exit(2);fclose(f);if(hash!=netTestModelHash()){printf("GEOSITH_NET FAIL: hash mismatch role=%d revision=%u host=%u local=%u\n",netTestRole,netRevision,hash,netTestModelHash());fflush(stdout);exit(2);}char name[32];snprintf(name,32,"client%d.ok",netTestRole);netTestMark(name,netRevision);printf("GEOSITH_NET_CLIENT PASS: role %d, full level, edits, undo/redo, stale rejection and matching document\n",netTestRole);fflush(stdout);exit(0);}
     if(netTestRole==1&&netTestMarker("client2.ok")&&netTestMarker("client3.ok")){if(netDeltaTransfers<2)exit(2);printf("GEOSITH_NET_MODAL PASS: discovery, join and edits while host modal; %u delta transfers, %llu / %llu bytes\n",netDeltaTransfers,(unsigned long long)netPackedBytes,(unsigned long long)netRawBytes);printf("GEOSITH_NET_HOST PASS: two clients, authoritative join/edit/undo, dropped and duplicated packets, revision %u\n",netRevision);fflush(stdout);exit(0);}
-    if(stdPlatform_GetTimeMsec()-netTestStart>90000){printf("GEOSITH_NET FAIL: timeout role=%d stage=%d ready=%d busy=%d revision=%u peers=%d,%d self=%d\n",netTestRole,netTestStage,netReady,netBusy,netRevision,netPeers[0].player,netPeers[1].player,stdComm_dplayIdSelf);fflush(stdout);exit(2);}
+    if(stdPlatform_GetTimeMsec()-netTestStart>(getenv("GEOSITH_NET_TIMEOUT_MS")?(uint32_t)atoi(getenv("GEOSITH_NET_TIMEOUT_MS")):90000u)){printf("GEOSITH_NET FAIL: timeout role=%d stage=%d ready=%d busy=%d revision=%u peers=%d,%d self=%d\n",netTestRole,netTestStage,netReady,netBusy,netRevision,netPeers[0].player,netPeers[1].player,stdComm_dplayIdSelf);fflush(stdout);exit(2);}
     sithNet_isMulti=0;sithMessage_g_outputstream&=~1;sithMessage_g_inputstream&=~1;return 1;
 }

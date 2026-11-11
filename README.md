@@ -24,14 +24,14 @@ New single-player levels start with one room and one walkplayer. Multiplayer lev
 | --- | --- |
 | **3D level editing** | Select and move surfaces, edges, and vertices; cleave, extrude, weld, and clean up geometry. |
 | **2D map views** | Edit from six directions, mirror geometry, draw spline corridors, and use adaptive grid snapping with blue origin axes. |
-| **Terrain sculpting** | Create terrain across angled surfaces and sectors, raise/lower it, and smooth connected seams with Ctrl + Fire1. |
+| **Terrain sculpting** | Create terrain across angled surfaces and sectors, sculpt, grab, smooth, and paint textures across connected seams. |
 | **Custom resources** | Load mods, convert PNG textures to MAT, and synchronize resources with multiplayer clients. |
-| **Materials and lighting** | Browse texture thumbnails, adjust UVs, change sector brightness, and place lights that bake into vertex lighting. |
+| **Materials and lighting** | Browse textures, stitch UVs, bake decals and texture paint, and place vertex lights. |
 | **Things and animation paths** | Place game objects, edit attributes, and move or rotate translucent path-frame previews. |
 | **3DO model builder** | Start from primitives, cleave and extrude faces, apply materials, and save reusable models or walkstructs. |
 | **Templates and COGs** | Create custom templates and assign script parameters by picking things, surfaces, or sectors in the level. |
 | **Level and episode settings** | Edit colormaps, physics, sky settings, loading text, and episode sequences. |
-| **Multiplayer collaboration** | Edit the same level together, with host validation, immediate client previews, and synchronized undo. |
+| **Multiplayer collaboration** | Edit together with host validation, compressed transfers, painting locks, and synchronized undo. |
 | **Undo and redo** | Undo up to 30 edits. A continuous drag counts as one edit. |
 | **Stock-level conversion** | Open a stock map for editing and save a separate custom episode. Original game archives stay intact. |
 

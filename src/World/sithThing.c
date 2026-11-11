@@ -29,6 +29,7 @@
 #include "Engine/sithCamera.h"
 #include "Engine/sithPhysics.h"
 #include "Main/jkGame.h"
+#include "Main/jkEditor.h"
 #include "AI/sithAI.h"
 #include "AI/sithAIClass.h"
 #include "AI/sithAIAwareness.h"
@@ -463,6 +464,10 @@ flex_t sithThing_DamageThing(SithThing *pThing, SithThing *pDamageThing, flex_t 
 
     // Added: assert ported from OpenJones3D
     SITH_ASSERTREL(pThing);
+
+    // Block before DAMAGED COGs consume shields or trigger hurt effects.
+    if (pThing == sithPlayer_g_pLocalPlayerThing && jkEditor_Active())
+        return 0.0;
 
     // Added: noclip
     if (pThing == sithPlayer_g_pLocalPlayerThing && (g_debugmodeFlags & DEBUGFLAG_NOCLIP)) {

@@ -5,7 +5,7 @@
 #include <stdint.h>
 /* Versioned, little-endian field encoding. Only populated records go on wire;
    no compiler padding, pointers, unused cells or native struct layout. */
-#define ED_WIRE_VERSION 17u
+#define ED_WIRE_VERSION 22u
 typedef struct {unsigned char *bytes;size_t size,at;int read,ok,legacyUV;} EdWire;
 static void edWireBytes(EdWire *w,void *value,size_t size){if(!w->ok||w->at>w->size||size>w->size-w->at){w->ok=0;return;}if(w->read)edCopy(value,w->bytes+w->at,size);else if(w->bytes)edCopy(w->bytes+w->at,value,size);w->at+=size;}
 static void edWireNumber(EdWire *w,void *value,int size){unsigned char bytes[8];uint64_t number=0;if(!w->read){if(size==4){uint32_t n;edCopy(&n,value,4);number=n;}else edCopy(&number,value,size);}for(int i=0;i<size;i++)bytes[i]=(unsigned char)(number>>(i*8));edWireBytes(w,bytes,size);if(w->read&&w->ok){number=0;for(int i=0;i<size;i++)number|=(uint64_t)bytes[i]<<(i*8);if(size==4){uint32_t n=(uint32_t)number;edCopy(value,&n,4);}else edCopy(value,&number,size);}}
@@ -34,6 +34,8 @@ static void edWireCell(EdWire *w,EdCell *c){edWireNumber(w,&c->ambientLight,8);e
 }
 static void edWireAssetsLegacy(EdWire *w,EdModel *m){
     edWireCount(w,&m->assetCount,ED_ASSETS);edWireCount(w,&m->meshCount,ED_MESHES);
+    // Counts grow with the document, but untrusted counts must fit the payload.
+    if(w->read&&w->ok&&((size_t)m->assetCount>(w->size-w->at)/56||(size_t)m->meshCount>(w->size-w->at)/24))w->ok=0;
     for(int i=0;w->ok&&i<m->assetCount;i++){edWireBytes(w,m->assets[i].name,32);edWireVec(w,&m->assets[i].origin);}
     for(int i=0;w->ok&&i<m->meshCount;i++){edWireNumber(w,&m->meshes[i].asset,4);edWireCell(w,&m->meshes[i].geometry);}
 }
@@ -47,10 +49,51 @@ static void edWireTerrainGroups(EdWire *w,EdModel *m){
     for(int a=0;w->ok&&a<m->assetCount;a++)edWireNumber(w,&m->assets[a].terrainGroup,4);
     for(int i=0;w->ok&&i<m->meshCount;i++){EdMesh *mesh=&m->meshes[i];int n=(int)mesh->terrainNormals.size();edWireCount(w,&n,ED_FACES*3);if(w->read)mesh->terrainNormals.resize(n);for(int j=0;w->ok&&j<n;j++)edWireVec(w,&mesh->terrainNormals[j]);}
 }
+static void edWirePaint(EdWire *w,EdModel *m){
+    for(int a=0;w->ok&&a<m->assetCount;a++)edWireBytes(w,m->assets[a].paintSlots,sizeof(m->assets[a].paintSlots));
+    for(int i=0;w->ok&&i<m->meshCount;i++){
+        EdMesh &mesh=m->meshes[i];int n=(int)mesh.paint.size();edWireCount(w,&n,ED_PAINT_LAYERS);if(w->read&&w->ok)mesh.paint.resize(n);
+        for(int l=0;w->ok&&l<n;l++){EdPaintLayer &layer=mesh.paint[l];edWireBytes(w,layer.material,128);int count=(int)layer.weights.size();edWireCount(w,&count,512);if(w->read&&w->ok)layer.weights.resize(count);for(int v=0;w->ok&&v<count;v++)edWireNumber(w,&layer.weights[v],8);}
+    }
+}
 static void edWireTemplates(EdWire *w,EdModel *m){
     edWireCount(w,&m->templateCount,ED_CUSTOM_TEMPLATES);
     for(int i=0;w->ok&&i<m->templateCount;i++){EdTemplate *t=&m->templates[i];edWireBytes(w,t->name,64);edWireBytes(w,t->parent,64);edWireCount(w,&t->count,ED_TEMPLATE_PARAMS);
         for(int j=0;w->ok&&j<t->count;j++){edWireBytes(w,t->params[j].key,32);edWireBytes(w,t->params[j].value,128);}}
+}
+// Editable spline previews and reversible CSG cuts participate in undo/network/save.
+static void edWireSplineState(EdWire *w,EdSpline *s){
+    edWireCount(w,&s->invalid,1);edWireCount(w,&s->textureHeight,16384);
+    for(EdBuffer<EdCell> *cells:{&s->cutBefore,&s->cutAfter,&s->preview}){
+        int count=(int)cells->size();edWireCount(w,&count,ED_CELLS);
+        if(w->read&&((size_t)count>(w->size-w->at)/24)){w->ok=0;return;}
+        if(w->read)cells->clear();
+        for(int c=0;w->ok&&c<count;c++){
+            EdCell &cell=(*cells)[c];edWireCell(w,&cell);edWireNumber(w,&cell.flags,4);edWireVec(w,&cell.tint);edWireVec(w,&cell.thrust);edWireBytes(w,cell.sound,32);edWireNumber(w,&cell.soundVolume,8);edWireNumber(w,&cell.tolerance,8);edWireBytes(w,cell.colormap,128);edWireBytes(w,cell.layer,64);edWireNumber(w,&cell.splineId,4);edWireNumber(w,&cell.arrayId,4);
+            for(int f=0;w->ok&&f<cell.count;f++){edWireNumber(w,&cell.f[f].uvRotation,8);edWireNumber(w,&cell.f[f].decalId,4);for(int v=0;w->ok&&v<cell.f[f].count;v++)edWireNumber(w,&cell.f[f].v[v].light,8);}
+        }
+    }
+    if(s->cutBefore.size()!=s->cutAfter.size())w->ok=0;
+}
+static void edWireGroups(EdWire *w,EdModel *m){
+    edWireCount(w,&m->groupCount,256);
+    for(int i=0;w->ok&&i<m->groupCount;i++){
+        EdSectorGroup &g=m->groups[i];edWireBytes(w,g.name,64);edWireCount(w,&g.direction,5);edWireCount(w,&g.copies,256);edWireCount(w,&g.count,ED_CELLS);
+        for(int c=0;w->ok&&c<g.count;c++){
+            EdCell &cell=g.cells[c];edWireCell(w,&cell);edWireNumber(w,&cell.flags,4);edWireVec(w,&cell.tint);edWireVec(w,&cell.thrust);edWireBytes(w,cell.sound,32);edWireNumber(w,&cell.soundVolume,8);edWireNumber(w,&cell.tolerance,8);edWireBytes(w,cell.colormap,128);edWireBytes(w,cell.layer,64);
+            for(int f=0;w->ok&&f<cell.count;f++){edWireNumber(w,&cell.f[f].uvRotation,8);edWireNumber(w,&cell.f[f].decalId,4);for(int v=0;w->ok&&v<cell.f[f].count;v++)edWireNumber(w,&cell.f[f].v[v].light,8);}
+        }
+    }
+    for(int c=0;w->ok&&c<m->count;c++)edWireCount(w,&m->c[c].arrayId,m->groupCount);
+}
+static void edWireDecals(EdWire *w,EdModel *m){
+    edWireCount(w,&m->decalCount,256);size_t total=0;
+    for(int i=0;w->ok&&i<m->decalCount;i++){
+        EdDecalMaterial &d=m->decals[i];edWireBytes(w,d.name,32);int n=d.data?(int)d.data->size():0;edWireCount(w,&n,140+2048*2048*2);total+=n;if(total>32*1024*1024||n<142||w->at>w->size||(size_t)n>w->size-w->at){w->ok=0;break;}
+        if(w->read){auto bytes=std::make_shared<std::vector<unsigned char>>(n);edWireBytes(w,bytes->data(),n);d.data=bytes;}else edWireBytes(w,(void*)d.data->data(),n);
+    }
+    for(int s=0;w->ok&&s<m->count;s++)for(int f=0;w->ok&&f<m->c[s].count;f++)edWireCount(w,&m->c[s].f[f].decalId,m->decalCount);
+    for(int i=0;w->ok&&i<m->meshCount;i++)for(int f=0;w->ok&&f<m->meshes[i].geometry.count;f++)edWireCount(w,&m->meshes[i].geometry.f[f].decalId,m->decalCount);
 }
 static void edWireModel(EdWire *w,EdModel *m){
     edWireCount(w,&m->count,ED_CELLS);
@@ -93,7 +136,7 @@ static void edWireModel(EdWire *w,EdModel *m){
     }
     edWireCount(w,&m->cogCount,ED_COGS);
     for(int i=0;w->ok&&i<m->cogCount;i++){EdPlacedCog *c=&m->cogs[i];edWireBytes(w,c->file,32);edWireCount(w,&c->count,ED_COG_PARAMS);for(int j=0;w->ok&&j<c->count;j++){EdCogParam *p=&c->params[j];edWireBytes(w,p->name,32);edWireBytes(w,p->value,32);edWireNumber(w,&p->type,4);edWireNumber(w,&p->cell,4);edWireNumber(w,&p->face,4);}}
-    edWireAssets(w,m);edWireTemplates(w,m);edWireMeshRotations(w,m);edWireTerrain(w,m);edWireTerrainGroups(w,m);
+    edWireAssets(w,m);edWireTemplates(w,m);edWireMeshRotations(w,m);edWireTerrain(w,m);edWireTerrainGroups(w,m);edWirePaint(w,m);
     for(int s=0;w->ok&&s<m->count;s++)edWireCell(w,&m->c[s]);
     for(int s=0;w->ok&&s<m->count;s++){EdCell *c=&m->c[s];edWireNumber(w,&c->flags,4);edWireVec(w,&c->tint);edWireVec(w,&c->thrust);edWireBytes(w,c->sound,32);edWireNumber(w,&c->soundVolume,8);edWireNumber(w,&c->tolerance,8);edWireBytes(w,c->colormap,128);edWireBytes(w,c->layer,64);
         for(int f=0;w->ok&&f<c->count;f++)edWireNumber(w,&c->f[f].uvRotation,8);
@@ -102,6 +145,9 @@ static void edWireModel(EdWire *w,EdModel *m){
     edWireCount(w,&m->splineCount,ED_SPLINES);
     for(int i=0;w->ok&&i<m->splineCount;i++){EdSpline *s=&m->splines[i];edWireNumber(w,&s->id,4);edWireNumber(w,&s->closed,4);edWireNumber(w,&s->mirrorAxes,4);edWireCount(w,&s->count,ED_SPLINE_POINTS);edWireNumber(w,&s->sides,4);edWireNumber(w,&s->segments,4);edWireNumber(w,&s->material,4);edWireNumber(w,&s->width,8);edWireNumber(w,&s->height,8);edWireNumber(w,&s->geometryHash,4);for(int p=0;w->ok&&p<s->count;p++){edWireVec(w,&s->points[p].position);edWireVec(w,&s->points[p].handle);}}
     for(int i=0;w->ok&&i<m->count;i++)edWireNumber(w,&m->c[i].splineId,4);
+    edWireDecals(w,m);
+    edWireGroups(w,m);
+    for(int i=0;w->ok&&i<m->splineCount;i++){edWireCount(w,&m->splines[i].groupId,m->groupCount);edWireSplineState(w,&m->splines[i]);}
 }
 static unsigned char *edWireEncode(const EdModel *model,uint32_t *size){
     EdWire measure={NULL,ED_NET_LIMIT/2,0,0,1};edWireModel(&measure,(EdModel*)model);if(!measure.ok)return NULL;

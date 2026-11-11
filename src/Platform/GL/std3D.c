@@ -9,6 +9,7 @@
 #include "Engine/rdColormap.h"
 #include "Main/jkGame.h"
 #include "Main/jkEditor.h"
+#include "Engine/rdroid.h"
 #include "World/jkPlayer.h"
 #include "General/stdBitmap.h"
 #include "stdPlatform.h"
@@ -114,7 +115,7 @@ GLuint programDefault, programMenu;
 GLint attribute_coord3d, attribute_v_color, attribute_v_light, attribute_v_uv, attribute_v_norm;
 GLint uniform_mvp, uniform_tex, uniform_texEmiss, uniform_displacement_map, uniform_tex_mode, uniform_blend_mode, uniform_worldPalette, uniform_worldPaletteLights;
 GLint uniform_tint, uniform_filter, uniform_fade, uniform_add, uniform_emissiveFactor, uniform_albedoFactor;
-static GLint uniform_editorModelBlue;
+static GLint uniform_editorModelBlue, uniform_editorTerrainRed;
 GLint uniform_light_mult, uniform_displacement_factor, uniform_iResolution;
 
 // Added: Custom RGB lightsaber shader uniforms.
@@ -518,6 +519,7 @@ int init_resources()
     uniform_tint = std3D_tryFindUniform(programDefault, "colorEffects_tint");
     uniform_filter = std3D_tryFindUniform(programDefault, "colorEffects_filter");
     uniform_editorModelBlue = std3D_tryFindUniform(programDefault, "editorModelBlue");
+    uniform_editorTerrainRed = std3D_tryFindUniform(programDefault, "editorTerrainRed");
     uniform_fade = std3D_tryFindUniform(programDefault, "colorEffects_fade");
     uniform_add = std3D_tryFindUniform(programDefault, "colorEffects_add");
     uniform_emissiveFactor = std3D_tryFindUniform(programDefault, "emissiveFactor");
@@ -808,9 +810,32 @@ int std3D_StartScene()
     glCullFace(GL_FRONT);
     //glClampColor(GL_CLAMP_FRAGMENT_COLOR, GL_FALSE);
 
+    // Regression: emulate a preceding transparent draw with depth writes off.
+    const int testDepthClear = getenv("GEOSITH_DEPTH_CLEAR_TEST") && getenv("GEOSITH_STRESS");
+    if (testDepthClear) {
+        glDepthMask(GL_TRUE);
+        glClearDepth(0.0);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glClearDepth(1.0);
+        glDepthMask(GL_FALSE);
+    }
     // Technically this should be from Clear2
+    // Transparent batches can leave depth writes disabled. glClear obeys
+    // that mask too: stale depth then hides subsequent world frames.
+    glDepthMask(GL_TRUE);
     glClearColor(0.0, 0.0, 0.0, 1.0);
     glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+    if (testDepthClear) {
+        float depth = -1.0f;
+        glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+        if (depth != 1.0f) {
+            printf("GEOSITH_DEPTH_CLEAR FAIL: depth remained %f\n", depth);fflush(stdout);exit(2);
+        }
+        static int depthChecks;
+        if (++depthChecks == 8) {
+            puts("GEOSITH_DEPTH_CLEAR PASS: both world framebuffers clear with depth writes previously disabled");fflush(stdout);
+        }
+    }
     
     if (jkGuiBuildMulti_bRendering && rdColormap_pCurMap && loaded_colormap != rdColormap_pCurMap)
     {
@@ -2727,6 +2752,7 @@ void std3D_DrawRenderList()
     else
         glUniform3f(uniform_filter, 1.0, 1.0, 1.0);
     glUniform1i(uniform_editorModelBlue,jkEditor_ModelBlue());
+    glUniform1i(uniform_editorTerrainRed,rdroid_editorTerrainRed);
     glUniform1f(uniform_fade, rdroid_curColorEffects.fade);
     glUniform3f(uniform_add, (float)rdroid_curColorEffects.add.x / 255.0f, (float)rdroid_curColorEffects.add.y / 255.0f, (float)rdroid_curColorEffects.add.z / 255.0f);
     glUniform3f(uniform_emissiveFactor, 0.0, 0.0, 0.0);

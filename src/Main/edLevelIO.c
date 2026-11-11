@@ -1,4 +1,5 @@
 #include "edLevelIO.h"
+#include "edWire.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -164,7 +165,8 @@ static int jkl(FILE *f,const EdModel *m,const char *resources) {
     }
     for(int s=0;s<m->count;s++)for(int p=0;p<m->c[s].count;p++){const EdFace *face=&m->c[s].f[p];if(face->uvRotation){EdSurfaceAttributes a=edSurfaceAttributes(face);fprintf(f,"# GeoSith texture rotation %d %d %.17g %.17g %.17g %.17g %.17g\n",s,p,face->uvRotation,face->uOffset,face->vOffset,a.uScale,a.vScale);}}
     for(int s=0;s<m->count;s++)for(int face=0;face<m->c[s].count;face++)if(m->c[s].f[face].customUV)fprintf(f,"# GeoSith custom uv %d %d\n",s,face);
-    for(int i=0;i<m->splineCount;i++){const EdSpline &s=m->splines[i];fprintf(f,"# GeoSith spline %d %d %d %d %.17g %.17g\n",s.id,s.sides,s.segments,s.material,s.width,s.height);for(int p=0;p<s.count;p++){const EdSplinePoint &v=s.points[p];fprintf(f,"# GeoSith splinepoint %d %d %.17g %.17g %.17g %.17g %.17g %.17g\n",s.id,p,v.position.x,v.position.y,v.position.z,v.handle.x,v.handle.y,v.handle.z);}}
+    for(int i=0;i<m->splineCount;i++){const EdSpline &s=m->splines[i];fprintf(f,"# GeoSith spline %d %d %d %d %.17g %.17g\n",s.id,s.sides,s.segments,s.material,s.width,s.height);if(s.groupId)fprintf(f,"# GeoSith splinegroup %d %d\n",s.id,s.groupId);for(int p=0;p<s.count;p++){const EdSplinePoint &v=s.points[p];fprintf(f,"# GeoSith splinepoint %d %d %.17g %.17g %.17g %.17g %.17g %.17g\n",s.id,p,v.position.x,v.position.y,v.position.z,v.handle.x,v.handle.y,v.handle.z);}}
+    for(int i=0;i<m->splineCount;i++){EdSpline state=m->splines[i];EdWire measure={NULL,ED_NET_LIMIT/2,0,0,1};edWireSplineState(&measure,&state);if(!measure.ok)return 0;std::vector<unsigned char> bytes(measure.at);EdWire w={bytes.data(),bytes.size(),0,0,1};edWireSplineState(&w,&state);for(size_t offset=0;offset<bytes.size();offset+=128){fprintf(f,"# GeoSith splinestate %d %u ",state.id,(unsigned)offset);for(size_t b=offset;b<bytes.size()&&b<offset+128;b++)fprintf(f,"%02x",bytes[b]);fprintf(f,"\n");}}
     for(int i=0;i<m->splineCount;i++)if(m->splines[i].closed)fprintf(f,"# GeoSith splineclosed %d\n",m->splines[i].id);
     for(int i=0;i<m->splineCount;i++)if(m->splines[i].mirrorAxes)fprintf(f,"# GeoSith splinemirror %d %d\n",m->splines[i].id,m->splines[i].mirrorAxes);
     for(int c=0;c<m->count;c++)if(m->c[c].splineId)fprintf(f,"# GeoSith splinecell %d %d\n",c,m->c[c].splineId);
@@ -261,6 +263,8 @@ int edWriteGob(const EdModel *m,const char *path,const char *title,int multiplay
     for(int i=0;i<5;i++) { char name[128]={0}; strcpy(name,names[i]); u32(f,offsets[i]);u32(f,sizes[i]);fwrite(name,1,128,f); }
     if(fseek(f,8,SEEK_SET)) ok=0; u32(f,directory); if(ferror(f)) ok=0; if(fclose(f)) ok=0;
     if(ok)ok=writeMeshAssets(m,path,resources);
+    if(ok)ok=writeGroups(m,path);
+    for(int i=0;ok&&i<m->decalCount;i++){char name[64];snprintf(name,sizeof(name),"mat\\%s",m->decals[i].name);ok=edGobAddFile(path,name,m->decals[i].data->data(),(unsigned)m->decals[i].data->size());}
     if(!ok) remove(path); return ok;
 }
 

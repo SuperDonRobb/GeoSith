@@ -20,6 +20,7 @@ if(NOT MSVC)
   target_link_libraries(editor_tests PRIVATE m)
 endif()
 add_test(NAME geometry COMMAND editor_tests)
+add_test(NAME tunnel_group_spline COMMAND editor_tests --group-fixture "${CMAKE_CURRENT_SOURCE_DIR}/tunnel_group_fixture.bin")
 
 add_executable(network_unit_tests network_test.cpp)
 target_compile_features(network_unit_tests PRIVATE cxx_std_17)
@@ -47,3 +48,9 @@ endif()
 
 add_executable(sound_identity_tests sound_identity_test.cpp)
 add_test(NAME sound_identity COMMAND sound_identity_tests)
+
+find_package(ZLIB REQUIRED)
+add_executable(network_zip_tests network_zip_test.cpp)
+target_compile_features(network_zip_tests PRIVATE cxx_std_17)
+target_link_libraries(network_zip_tests PRIVATE ZLIB::ZLIB)
+add_test(NAME network_zip COMMAND network_zip_tests)

@@ -72,7 +72,7 @@ extern "C"
 void Hack_ResetClients();
 
 static uint32_t GNSLayout(){return (uint32_t)(sizeof(jkMultiEntry)^sizeof(rdVector3)*17u^sizeof(flex_t)*31u);}
-enum { GNS_MAGIC=0x47534954, GNS_VERSION=17, GNS_INFO=1, GNS_AUTH=2, GNS_ACCEPT=3 };
+enum { GNS_MAGIC=0x47534954, GNS_VERSION=20, GNS_INFO=1, GNS_AUTH=2, GNS_ACCEPT=3 };
 #pragma pack(push, 4)
 struct GNSInfoPacket { uint32_t magic,version,kind,id,mode,layout; uint64_t assets; jkMultiEntry entry; };
 struct GNSAuthPacket { uint32_t magic,version,kind,mode,layout; uint64_t assets; char16_t password[32]; };
@@ -340,7 +340,9 @@ static bool HashAssets() {
     gnsAssets=hash?hash:1;return true;
 }
 static void ConfigureLanes(HSteamNetConnection connection) {
-    int priorities[2]={10,0};uint16 weights[2]={1,1};
+    // GNS services LOWER numeric priorities first. Gameplay/control traffic
+    // must precede bulk editor snapshots, including during continuous painting.
+    int priorities[2]={0,10};uint16 weights[2]={1,1};
     g_SteamNetworkingSockets()->ConfigureConnectionLanes(connection,2,priorities,weights);
 }
 static bool SendTransport(HSteamNetConnection connection,const void *data,uint32_t length,bool envelope=true) {
@@ -349,6 +351,14 @@ static bool SendTransport(HSteamNetConnection connection,const void *data,uint32
     if(envelope&&length>=12){uint32_t type;memcpy(&type,(const char*)data+8,4);type&=255;
         if(type==JKEDITOR_NET_MESSAGE&&length>=24){uint32_t kind;memcpy(&kind,(const char*)data+20,4);if(kind==1||kind==2)lane=1;}
         else if(type==DSS_THINGPOS)flags=k_nSteamNetworkingSend_UnreliableNoNagle;}
+    if(lane==1){
+        SteamNetConnectionRealTimeStatus_t status={};
+        // Do not fill the shared transport queue with bulk data. Returning
+        // false leaves this chunk queued in the editor's bounded send window.
+        int bulkLimit=getenv("GEOSITH_NET_ROLE")?4096:65536;
+        if(g_SteamNetworkingSockets()->GetConnectionRealTimeStatus(connection,&status,0,nullptr)==k_EResultOK
+            &&status.m_cbPendingReliable+status.m_cbPendingUnreliable+(int)length>bulkLimit)return false;
+    }
     SteamNetworkingMessage_t *message=g_SteamNetworkingUtils()->AllocateMessage(length);if(!message)return false;
     memcpy(message->m_pData,data,length);message->m_conn=connection;message->m_nFlags=flags;message->m_idxLane=lane;
     int64 result=0;g_SteamNetworkingSockets()->SendMessages(1,&message,&result);

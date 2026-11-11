@@ -161,7 +161,7 @@ static void surfaceAttributesDialog(void) {
             int value=chooseList(labels[field],names,limit,(int)surfaceNumeric(&draft[0],field));
             if(value>=0)for(int i=0;i<count;i++){if(field==3)draft[i].attributes.geometryMode=value;else if(field==4)draft[i].attributes.textureMode=value;else draft[i].attributes.lightingMode=value;}
         }else if(choice==1){remember();edCopyModel(candidate,model);
-            for(int i=0;i<count;i++){EdHit h=selected.hits[i];EdFace *face=&candidate->c[h.cell].f[h.face];if(face->customUV){EdSurfaceAttributes old=edSurfaceAttributes(face);for(int v=0;v<face->count;v++){face->v[v].u*=old.uScale/draft[i].attributes.uScale;face->v[v].v*=old.vScale/draft[i].attributes.vScale;}}face->material=draft[i].material;face->attributes=draft[i].attributes;face->hasAttributes=1;edMapFace(face);}
+            for(int i=0;i<count;i++){EdHit h=selected.hits[i];EdFace *face=&candidate->c[h.cell].f[h.face];if(face->customUV){EdSurfaceAttributes old=edSurfaceAttributes(face);for(int v=0;v<face->count;v++){face->v[v].u*=old.uScale/draft[i].attributes.uScale;face->v[v].v*=old.vScale/draft[i].attributes.vScale;}}if(face->material!=draft[i].material)applyFaceMaterial(face,draft[i].material);face->attributes=draft[i].attributes;face->hasAttributes=1;edMapFace(face);}
             if(commit()){say("Surface attributes updated. Ctrl+Z: undo.");break;}
         }
     }
