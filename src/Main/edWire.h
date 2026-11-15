@@ -5,7 +5,7 @@
 #include <stdint.h>
 /* Versioned, little-endian field encoding. Only populated records go on wire;
    no compiler padding, pointers, unused cells or native struct layout. */
-#define ED_WIRE_VERSION 22u
+#define ED_WIRE_VERSION 26u
 typedef struct {unsigned char *bytes;size_t size,at;int read,ok,legacyUV;} EdWire;
 static void edWireBytes(EdWire *w,void *value,size_t size){if(!w->ok||w->at>w->size||size>w->size-w->at){w->ok=0;return;}if(w->read)edCopy(value,w->bytes+w->at,size);else if(w->bytes)edCopy(w->bytes+w->at,value,size);w->at+=size;}
 static void edWireNumber(EdWire *w,void *value,int size){unsigned char bytes[8];uint64_t number=0;if(!w->read){if(size==4){uint32_t n;edCopy(&n,value,4);number=n;}else edCopy(&number,value,size);}for(int i=0;i<size;i++)bytes[i]=(unsigned char)(number>>(i*8));edWireBytes(w,bytes,size);if(w->read&&w->ok){number=0;for(int i=0;i<size;i++)number|=(uint64_t)bytes[i]<<(i*8);if(size==4){uint32_t n=(uint32_t)number;edCopy(value,&n,4);}else edCopy(value,&number,size);}}
@@ -95,6 +95,37 @@ static void edWireDecals(EdWire *w,EdModel *m){
     for(int s=0;w->ok&&s<m->count;s++)for(int f=0;w->ok&&f<m->c[s].count;f++)edWireCount(w,&m->c[s].f[f].decalId,m->decalCount);
     for(int i=0;w->ok&&i<m->meshCount;i++)for(int f=0;w->ok&&f<m->meshes[i].geometry.count;f++)edWireCount(w,&m->meshes[i].geometry.f[f].decalId,m->decalCount);
 }
+static void edWireBakedCell(EdWire *w,EdCell &cell){
+    for(int f=0;w->ok&&f<cell.count;f++){EdFace &face=cell.f[f];edWireCount(w,&face.bakedLight,1);if(face.bakedLight)for(int v=0;w->ok&&v<face.count;v++)edWireVec(w,&face.v[v].lightRGB);}
+}
+static void edWireMeshLighting(EdWire *w,EdModel *m){
+    for(int i=0;w->ok&&i<m->meshCount;i++){
+        EdCell &cell=m->meshes[i].geometry;edWireBakedCell(w,cell);
+        for(int f=0;w->ok&&f<cell.count;f++)if(cell.f[f].bakedLight)for(int v=0;w->ok&&v<cell.f[f].count;v++)edWireNumber(w,&cell.f[f].v[v].light,8);
+    }
+}
+static void edWireAssetLighting(EdWire *w,EdModel *m){for(int a=0;w->ok&&a<m->assetCount;a++)edWireCount(w,&m->assets[a].lightBaker,1);}
+static void edWireBaked(EdWire *w,EdModel *m){
+    // Optional trailing extension keeps pre-baker saved geometry fixtures readable.
+    if(w->read&&w->at==w->size)return;
+    unsigned tag=0x314b424c;edWireNumber(w,&tag,4);if(tag!=0x314b424c){w->ok=0;return;}
+    for(int c=0;w->ok&&c<m->count;c++)edWireBakedCell(w,m->c[c]);
+    for(int i=0;w->ok&&i<m->meshCount;i++)edWireBakedCell(w,m->meshes[i].geometry);
+    for(int i=0;w->ok&&i<m->groupCount;i++)for(int c=0;w->ok&&c<m->groups[i].count;c++)edWireBakedCell(w,m->groups[i].cells[c]);
+    for(int i=0;w->ok&&i<m->splineCount;i++)for(auto cells:{&m->splines[i].cutBefore,&m->splines[i].cutAfter,&m->splines[i].preview})for(size_t c=0;w->ok&&c<cells->size();c++)edWireBakedCell(w,(*cells)[c]);
+    for(int i=0;w->ok&&i<m->lightCount;i++)edWireVec(w,&m->lights[i].color);
+    // Older payloads end after sector baked lighting and light colors.
+    if(w->read&&w->at==w->size)return;
+    unsigned meshTag=0x314c424d;edWireNumber(w,&meshTag,4);if(meshTag!=0x314c424d){w->ok=0;return;}
+    edWireMeshLighting(w,m);
+    if(w->read&&w->at==w->size)return;
+    unsigned assetTag=0x3141424c;edWireNumber(w,&assetTag,4);if(assetTag!=0x3141424c){w->ok=0;return;}
+    edWireAssetLighting(w,m);
+    if(w->read&&w->at==w->size)return;
+    if(!m->splineCount)return;
+    unsigned splineModelTag=0x314d5053;edWireNumber(w,&splineModelTag,4);if(splineModelTag!=0x314d5053){w->ok=0;return;}
+    for(int i=0;w->ok&&i<m->splineCount;i++){edWireCount(w,&m->splines[i].makeWalkstruct,1);edWireBytes(w,m->splines[i].walkstructName,32);}
+}
 static void edWireModel(EdWire *w,EdModel *m){
     edWireCount(w,&m->count,ED_CELLS);
     edWireVec(w,&m->spawn);
@@ -147,7 +178,8 @@ static void edWireModel(EdWire *w,EdModel *m){
     for(int i=0;w->ok&&i<m->count;i++)edWireNumber(w,&m->c[i].splineId,4);
     edWireDecals(w,m);
     edWireGroups(w,m);
-    for(int i=0;w->ok&&i<m->splineCount;i++){edWireCount(w,&m->splines[i].groupId,m->groupCount);edWireSplineState(w,&m->splines[i]);}
+    for(int i=0;w->ok&&i<m->splineCount;i++){edWireCount(w,&m->splines[i].groupId,m->groupCount);edWireSplineState(w,&m->splines[i]);edWireNumber(w,&m->splines[i].sectorFlags,4);edWireNumber(w,&m->splines[i].sectorFlagsMask,4);edWireNumber(w,&m->splines[i].hasSectorTint,4);edWireVec(w,&m->splines[i].sectorTint);}
+    edWireBaked(w,m);
 }
 static unsigned char *edWireEncode(const EdModel *model,uint32_t *size){
     EdWire measure={NULL,ED_NET_LIMIT/2,0,0,1};edWireModel(&measure,(EdModel*)model);if(!measure.ok)return NULL;

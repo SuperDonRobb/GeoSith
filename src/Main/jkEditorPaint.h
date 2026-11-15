@@ -33,7 +33,8 @@ static rdMaterial *terrainBakeLive(const EdModel *source,int asset,EdPaintBake *
     if(terrainDeferBake&&terrainBakedMaterials[path]&&cached.uv.size()==vertices){
         terrainDeferredBakes.insert(source->assets[asset].name);bake->size=cached.size;bake->uv=cached.uv;return terrainBakedMaterials[path];
     }
-    edPaintLoadImage=terrainLoadImage;if(!edPaintBakeAsset(source,asset,&cached,1))return NULL;
+    unsigned started=stdPlatform_GetTimeMsec();edPaintLoadImage=terrainLoadImage;if(!edPaintBakeAsset(source,asset,&cached,1))return NULL;
+    if(getenv("GEOSITH_STARTUP_PROFILE")||getenv("GEOSITH_TERRAIN_PROFILE"))fprintf(stderr,"ATLAS %s: %u ms\n",source->assets[asset].name,stdPlatform_GetTimeMsec()-started);
     terrainDeferredBakes.erase(source->assets[asset].name);
     // Live model construction only needs UVs, not a copy of the large bitmap.
     bake->size=cached.size;bake->uv=cached.uv;bake->updatedFaces=cached.updatedFaces;

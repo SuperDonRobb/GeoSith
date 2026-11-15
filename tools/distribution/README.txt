@@ -63,7 +63,7 @@ Spline corridors (overhead map)
   and mirrored connections keep spline controls. Use Convert to Sectors in the
   spline shape menu before cleaving, extruding or moving its generated geometry.
   Conversion is one undo step; undo restores the controls.
-- Multiplayer participants must use this updated build (editor protocol 22).
+- Multiplayer participants must use this updated build (editor protocol 25).
 
 Spline tunnel textures follow the corridor length and wrap around its cross-section.
 The perimeter is stretched to a whole number of texture repeats for a closed seam.
@@ -133,3 +133,64 @@ the surface to you. You see a red border; other editors see a red tint and canno
 change its texture. Strokes stay local until you press Escape, change weapons or
 texture mode, or begin painting another surface. The completed painting is sent
 once and becomes one shared undo step.
+
+Spline Shape and Geometry: Sector Flags opens the checkbox picker. Apply changes
+the selected flags across all spline sectors, including mirrored copies. Choices
+persist through regeneration, Save Level, and multiplayer synchronization.
+
+Spline Sector tint accepts red, green, and blue values from 0 to 1 (for example,
+0.1 0.2 0.3). Use 0 0 0 for no tint, or blank to inherit sector-group tint.
+
+DESTRUCTIBLE WALL GENERATOR
+Select sectors (weapon 1, Ctrl+fire1), press Enter, Generate, Destructible.
+Creates a textured wall, fracture debris, and an assigned placed COG. Saber or
+explosion damage breaks it; ordinary shots do not. Debris scatters and expires
+after 4 seconds. The explosion effect adds no blast damage. The original sector
+volumes remain. Save Level includes the generated models/templates and script.
+Requires 14 free custom-template slots by default. Convert splines first.
+
+GENERATE LIFT
+Select one sector with weapon 1 (Ctrl+fire1), Enter > Generate > Lift_Bottom.
+Keep a clear shaft below the sector, connected by adjoins. The generated
+walkstruct starts with its walking surface 0.03125 units above the selected
+sector bottom. Default speed is 8, with stock elevator movement sounds.
+Frame 0 is the bottom; frame 1 is the original sector position. Stepping
+onto it raises it, and it returns after two seconds at the top. Adjust
+speed/delay in Placed COGs and positions in Thing Attributes. Saved models,
+templates, frames and the stock elevator COG are included in the level.
+
+Lift_Top starts at the top instead: frame 0 is the top and frame 1 is the
+bottom. Speed, sounds and return delay are the same as Lift_Bottom.
+
+EDIT PLACED MODELS
+Weapon 9: aim at a placed 3DO and press fire1 to edit its mesh. Use weapon 2
+for textures. Escape > Save as 3DO, keeping the original name, updates all
+instances sharing the model. Discard leaves the original intact. Game/mod
+models import as static rest-pose geometry without animation or alternate
+LODs; edits are packaged in the level GOB, not the original resource files.
+
+The bound third-person camera button works in the 3D editor view.
+
+Adjoin cleaving: with weapon 0, hold Ctrl to target adjoins, then use fire1
+to cleave. Both sides are split together. In map view, select solid or adjoin
+surfaces (or carry their selection from 3D), press C, and draw a cleave line.
+
+Placed COGs: click a sound parameter to open a searchable sound browser.
+Apply your changes, then return to play mode to restart scripts with their
+new parameters. Entering edit mode stops sounds from placed COGs and clears
+their pending timers; deleting a COG no longer leaves its sound looping.
+
+With weapon 1 in Select mode, select a surface and press L to select its sector. This also works with selected adjoin surfaces and with multiple selected surfaces. Hold Ctrl to target adjoin surfaces when selecting them. Hold Shift and click to select sectors.
+
+Weapon 5 / Placed COGs: Import COG opens a Windows file picker and adds the script to Add COG. Create COG makes a starter script and opens the associated edit application (Notepad fallback). Edit COG lists custom scripts, including mod scripts, and opens a working copy under JK/editor-cogs. Save in the text editor to reload; valid changes preserve matching placed parameter values and restart running placed COGs. Invalid changes retain the last working version. Custom scripts are included when saving the level and shared with multiplayer clients; client changes require host approval. All players should use the current build.
+
+Weapon 2 texture paint: a locked surface has a red border for its painter and a red tint for other players.
+
+3DO mesh editing controls:
+- Weapon 9 + Fire 1 on a modeled thing: edit at its exact position and rotation. The source thing is hidden until the draft is saved or discarded.
+- Select tool (weapon 1) in 3DO mode: mouse wheel halves/doubles the grid (0.00390625 to 1 unit). A horizontal world-aligned grid preview appears around the player for 0.5 seconds. The chosen grid also controls model cleaves, extrusion, center movement, and box placement.
+- Ctrl + Fire 1: toggle whole-mesh selection. Fire 2 moves selected meshes.
+- Ctrl+C: copy selected meshes. Ctrl+V: paste in place, with the copies selected for moving.
+- I: enter invert mode (purple wireframe). X, Y, or Z mirrors the selection around its bounding-box center on that world axis. Escape cancels invert mode without leaving the 3DO editor. Mirroring preserves outward face winding and supports undo.
+
+- 3DO Select tool: highlight an edge or vertex and press Delete to dissolve it. The change is accepted only when the remaining faces stay planar and convex without holes; Ctrl+Z undoes it.

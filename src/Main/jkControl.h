@@ -9,6 +9,7 @@
 #define jkControl_HandleHudKeys_ADDR (0x004028E0)
 
 void jkControl_HandleScreenshot(void);
+void jkControl_HandleCamera(SithThing *player);
 int jkControl_HandleChat(void);
 int jkControl_Startup();
 int jkControl_Shutdown();

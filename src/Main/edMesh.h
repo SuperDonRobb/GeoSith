@@ -32,15 +32,15 @@ int edMeshValidate(const EdModel *m){
     if(!edTemplatesValidate(m)||!edPaintValid(m)||!edDecalsValid(m))return 0;
     if(m->assetCount<0||m->assetCount>ED_ASSETS||m->meshCount<0||m->meshCount>ED_MESHES)return 0;
     for(int a=0;a<m->assetCount;a++){
-        const EdAsset *asset=&m->assets[a];if(asset->terrainGroup<0)return 0;if((asset->saved!=0&&asset->saved!=1)||(asset->terrain!=0&&asset->terrain!=1))return 0;if(asset->terrain&&(!asset->saved||!isfinite(length(asset->terrainNormal))||fabs(length(asset->terrainNormal)-1)>.0001))return 0;if(!memchr(asset->name,0,32)||!asset->name[0]||strlen(asset->name)>27||length(asset->origin)>1e6||!isfinite(length(asset->origin)))return 0;
+        const EdAsset *asset=&m->assets[a];if(asset->terrainGroup<0||asset->lightBaker<0||asset->lightBaker>1)return 0;if((asset->saved!=0&&asset->saved!=1)||(asset->terrain!=0&&asset->terrain!=1))return 0;if(asset->terrain&&(!asset->saved||!isfinite(length(asset->terrainNormal))||fabs(length(asset->terrainNormal)-1)>.0001))return 0;if(!memchr(asset->name,0,32)||!asset->name[0]||strlen(asset->name)>27||length(asset->origin)>1e6||!isfinite(length(asset->origin)))return 0;
         for(const char *p=asset->name;*p;p++)if(!((*p>='a'&&*p<='z')||(*p>='A'&&*p<='Z')||(*p>='0'&&*p<='9')||*p=='_'||*p=='-'))return 0;
         for(int b=0;b<a;b++)if(!strcmp(asset->name,m->assets[b].name))return 0;
     }
     for(int i=0;i<m->meshCount;i++){
-        const EdMesh *mesh=&m->meshes[i];const EdCell *c=&mesh->geometry;int vertices=0;
+        const EdMesh *mesh=&m->meshes[i];const EdCell *c=&mesh->geometry;int vertices=0,triangles=0;
         if(mesh->asset<0||mesh->asset>=m->assetCount||c->count<1||c->count>ED_FACES)return 0;
-        for(int f=0;f<c->count;f++){if(!isfinite(c->f[f].uvRotation)||!meshFaceValid(&c->f[f])||c->f[f].material<0||c->f[f].neighbor!=-1)return 0;vertices+=c->f[f].count;}
-        if(vertices>512)return 0;if(mesh->terrainNormals.size()){if(mesh->terrainNormals.size()!=(size_t)c->count*3)return 0;for(size_t j=0;j<mesh->terrainNormals.size();j++){double n=length(mesh->terrainNormals[j]);if(!isfinite(n)||fabs(n-1)>.0001)return 0;}}if(m->assets[mesh->asset].terrain){if(mesh->terrainPinned.size()!=(size_t)c->count*3)return 0;for(int f=0;f<c->count;f++){if(c->f[f].count!=3)return 0;for(int v=0;v<3;v++)if(mesh->terrainPinned[f*3+v]>1)return 0;}}
+        for(int f=0;f<c->count;f++){if(!isfinite(c->f[f].uvRotation)||!meshFaceValid(&c->f[f])||c->f[f].material<0||c->f[f].neighbor!=-1)return 0;vertices+=c->f[f].count;triangles+=c->f[f].count-2;for(int v=0;v<c->f[f].count;v++){const EdVertex &p=c->f[f].v[v];if(!isfinite(p.light)||!isfinite(p.lightRGB.x)||!isfinite(p.lightRGB.y)||!isfinite(p.lightRGB.z))return 0;}}
+        if(vertices>ED_3DO_MESH_VERTICES||triangles>ED_3DO_MESH_TRIANGLES)return 0;if(mesh->terrainNormals.size()){if(mesh->terrainNormals.size()!=(size_t)c->count*3)return 0;for(size_t j=0;j<mesh->terrainNormals.size();j++){double n=length(mesh->terrainNormals[j]);if(!isfinite(n)||fabs(n-1)>.0001)return 0;}}if(m->assets[mesh->asset].terrain){if(mesh->terrainPinned.size()!=(size_t)c->count*3)return 0;for(int f=0;f<c->count;f++){if(c->f[f].count!=3)return 0;for(int v=0;v<3;v++)if(mesh->terrainPinned[f*3+v]>1)return 0;}}
     }return 1;
 }
 static void meshPrimitiveFace(EdCell *c,EdVec *points,int count,EdVec center,int material){
@@ -68,11 +68,11 @@ int edMeshPrimitiveDetail(EdModel *m,int asset,int primitive,EdVec center,int ma
     m->meshCount++;if(!edMeshValidate(m)){m->meshCount--;edZero(mesh,0,sizeof(*mesh));return 0;}return 1;
 }
 int edMeshPrimitive(EdModel *m,int asset,int primitive,EdVec center,int material){return edMeshPrimitiveDetail(m,asset,primitive,center,material,0);}
-int edMeshPrimitiveTransformedDetail(EdModel *m,int asset,int primitive,EdVec center,int material,double size,double degrees,int detail){
-    if(!isfinite(size)||size<ED_GRID||size>32||!isfinite(degrees))return 0;
+int edMeshPrimitiveTransformedDetail(EdModel *m,int asset,int primitive,EdVec center,int material,double size,double degrees,int detail,double grid){
+    if(!isfinite(grid)||grid<=0||!isfinite(size)||size<grid||size>32||!isfinite(degrees))return 0;
     int index=m->meshCount;if(!edMeshPrimitiveDetail(m,asset,primitive,center,material,detail))return 0;
     double angle=degrees*3.141592653589793/180,c=cos(angle),s=sin(angle);EdCell *cell=&m->meshes[index].geometry;
-    for(int f=0;f<cell->count;f++){EdFace *face=&cell->f[f];for(int v=0;v<face->count;v++){EdVec p=edScale(edSub(face->v[v].p,center),size/.5);EdVec placed=edAdd(center,edV(p.x*c-p.y*s,p.x*s+p.y*c,p.z));face->v[v].p=primitive==0?edSnapPoint(placed):placed;}edMapFace(face);}
+    for(int f=0;f<cell->count;f++){EdFace *face=&cell->f[f];for(int v=0;v<face->count;v++){EdVec p=edScale(edSub(face->v[v].p,center),size/.5);EdVec placed=edAdd(center,edV(p.x*c-p.y*s,p.x*s+p.y*c,p.z));face->v[v].p=primitive==0?edV(round(placed.x/grid)*grid,round(placed.y/grid)*grid,round(placed.z/grid)*grid):placed;}edMapFace(face);}
     int faces=cell->count;for(int f=0;f<faces;f++)if(!meshFaceValid(&cell->f[f])){
         EdFace original=cell->f[f];if(original.count<4||cell->count+original.count-3>ED_FACES){m->meshCount=index;return 0;}
         for(int v=1;v<original.count-1;v++){EdFace triangle=original;triangle.count=3;triangle.v[0]=original.v[0];triangle.v[1]=original.v[v];triangle.v[2]=original.v[v+1];if(v==1)cell->f[f]=triangle;else cell->f[cell->count++]=triangle;}
@@ -95,33 +95,65 @@ int edMeshRay(const EdModel *m,int asset,EdVec o,EdVec d,int handles,EdHit *h){
     return 1;
 }
 static int meshHitValid(const EdModel *m,EdHit h){return h.cell>=0&&h.cell<m->meshCount&&h.face>=0&&h.face<m->meshes[h.cell].geometry.count&&h.vertex<m->meshes[h.cell].geometry.f[h.face].count&&h.edge<m->meshes[h.cell].geometry.f[h.face].count;}
-int edMeshCleave(EdModel *m,EdHit h,EdVec a,EdVec b){
+int edMeshCleave(EdModel *m,EdHit h,EdVec a,EdVec b,double grid){
     if(!meshHitValid(m,h))return 0;EdCell *c=&m->meshes[h.cell].geometry;EdFace original=c->f[h.face],left,right;
-    a=edSnapMeshFacePoint(&original,a);b=edSnapMeshFacePoint(&original,b);
+    a=edSnapMeshFacePoint(&original,a,grid);b=edSnapMeshFacePoint(&original,b,grid);
     EdVec n=unit(edCross(edNormal(&original),edSub(b,a)));double d=edDot(n,a);
     if(length(n)<.9||c->count>=ED_FACES||!clip(&original,n,d,&left)||!clip(&original,edScale(n,-1),-d,&right)||!left.count||!right.count)return 0;
     EdCell before=*c;c->f[h.face]=left;c->f[c->count++]=right;
     if(connectCellEdges(c)&&edMeshValidate(m))return 1;*c=std::move(before);return 0;
 }
-int edMeshExtrude(EdModel *m,EdHit h){
+int edMeshExtrude(EdModel *m,EdHit h,double grid){
     if(!meshHitValid(m,h)||h.vertex>=0||h.edge>=0)return 0;EdCell *c=&m->meshes[h.cell].geometry;EdFace base=c->f[h.face];
-    if(c->count+base.count>ED_FACES)return 0;EdVec delta=edScale(edNormal(&base),ED_GRID);
+    if(c->count+base.count>ED_FACES)return 0;EdVec delta=edScale(edNormal(&base),grid);
     for(int i=0;i<base.count;i++)c->f[h.face].v[i].p=edAdd(base.v[i].p,delta);edMapFace(&c->f[h.face]);
     for(int i=0;i<base.count;i++){int j=(i+1)%base.count;EdFace *side=&c->f[c->count++];*side=base;side->count=4;side->v[0]=base.v[i];side->v[1]=base.v[j];side->v[2]=c->f[h.face].v[j];side->v[3]=c->f[h.face].v[i];edMapFace(side);}
     return edMeshValidate(m);
 }
-int edMeshMoveConstrained(EdModel *m,const EdModel *source,const EdSelection *selection,EdVec delta,int freeMovement){
+// Dissolve only coplanar patches; a hull is accepted only if it preserves area.
+// This prevents filling concave gaps or deleting the boundary of an open mesh.
+int edMeshDissolve(EdModel *m,EdHit hit){
+    if(!meshHitValid(m,hit))return 0;
+    EdCell before=m->meshes[hit.cell].geometry,result=before;result.count=0;
+    const EdFace &selected=before.f[hit.face];int vertex=hit.vertex>=0,index=vertex?hit.vertex:hit.edge;
+    if(index<0||index>=selected.count)return 0;
+    EdVec a=selected.v[index].p,b=selected.v[(index+1)%selected.count].p;
+    EdBuffer<unsigned char> done;int changed=0;
+    for(int f=0;f<before.count;f++){
+        if(done[f])continue;const EdFace &source=before.f[f];EdVec n=edNormal(&source);
+        EdBuffer<unsigned char> group;group[f]=1;int count=1;
+        int eligible=vertex?dissolvePointOnFace(&source,a):dissolveSharedEdge(&source,a,b);
+        if(eligible)for(int g=0;g<before.count;g++)if(g!=f&&!done[g]){
+            const EdFace &other=before.f[g];
+            if(edDot(n,edNormal(&other))>.99999&&fabs(edDot(n,edSub(other.v[0].p,source.v[0].p)))<ED_EPS&&
+               (vertex?dissolvePointOnFace(&other,a):dissolveSharedEdge(&other,a,b))){group[g]=1;count++;}
+        }
+        EdFace face=source;
+        if(eligible&&(vertex||count>1)){
+            if(!dissolveFaces(&before,group,group[hit.face]?hit.face:f,&face)||face.count>ED_SURFACE_VERTS)return 0;
+            if(vertex)for(int v=0;v<face.count;v++)if(same(face.v[v].p,a))return 0;
+            changed|=count>1||face.count!=source.count;
+        }
+        for(int g=0;g<before.count;g++)if(group[g])done[g]=1;
+        result.f[result.count++]=face;
+    }
+    if(!changed||!connectCellEdges(&result))return 0;
+    m->meshes[hit.cell].geometry=std::move(result);
+    if(edMeshValidate(m))return 1;
+    m->meshes[hit.cell].geometry=std::move(before);return 0;
+}
+int edMeshMoveConstrained(EdModel *m,const EdModel *source,const EdSelection *selection,EdVec delta,int freeMovement,double grid){
     if(!selection->count)return 0;
     for(int i=0;i<selection->count;i++)if(!meshHitValid(source,selection->hits[i]))return 0;
     int vertex=selection->count==1&&selection->hits[0].vertex>=0;EdVec target={0};
     // A grab is not an edit. In particular, don't snap curved/off-grid
     // primitives, connect edges or weld corners until the drag actually moves.
-    if(length(delta)<ED_GRID*.05){edCopyModel(m,source);return 1;}
-    if(!vertex){delta=edSnapPoint(delta);if(length(delta)<ED_EPS){edCopyModel(m,source);return 1;}}
+    if(length(delta)<grid*.05){edCopyModel(m,source);return 1;}
+    if(!vertex){delta=edV(round(delta.x/grid)*grid,round(delta.y/grid)*grid,round(delta.z/grid)*grid);if(length(delta)<ED_EPS){edCopyModel(m,source);return 1;}}
 
     if(vertex){EdHit h=selection->hits[0];const EdCell *cell=&source->meshes[h.cell].geometry;EdVec point=cell->f[h.face].v[h.vertex].p;
-        if(!freeMovement){EdModel edges;edges.count=1;edges.c[0]=*cell;h.cell=0;target=edAdd(point,edVertexEdgeDelta(&edges,h,delta));}
-        else{target=edSnapPoint(edAdd(point,delta));double nearest=ED_GRID*.55;
+        if(!freeMovement){EdModel edges;edges.count=1;edges.c[0]=*cell;h.cell=0;target=edAdd(point,edVertexEdgeDelta(&edges,h,delta,grid));}
+        else{target=edAdd(point,delta);target=edV(round(target.x/grid)*grid,round(target.y/grid)*grid,round(target.z/grid)*grid);double nearest=grid*.55;
             for(int f=0;f<cell->count;f++)for(int v=0;v<cell->f[f].count;v++){EdVec other=cell->f[f].v[v].p;double distance=length(edSub(other,target));if(distance<nearest){target=other;nearest=distance;}}}
     }
     if(vertex){EdHit h=selection->hits[0];if(same(target,source->meshes[h.cell].geometry.f[h.face].v[h.vertex].p)){edCopyModel(m,source);return 1;}}

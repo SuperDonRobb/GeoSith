@@ -109,7 +109,7 @@ rdModel3* rdModel3_Load(char *pName)
     return 0;
 }
 
-#define rdModel3_HelpDebug(s, ...) (s)
+#define rdModel3_HelpDebug(s, ...) do { if (getenv("GEOSITH_GOB_COMPAT_TEST")) stdPlatform_Printf(s, __VA_ARGS__); } while (0)
 
 // MOTS altered (RGB aLights?)
 int rdModel3_LoadEntry(char *pFilename, rdModel3 *pModel3)

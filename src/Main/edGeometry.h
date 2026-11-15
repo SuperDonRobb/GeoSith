@@ -15,6 +15,10 @@
 #define ED_IMPORT_EPS 0.001
 #define ED_GRID 0.0625
 #define ED_UV_SCALE 256.0
+#define ED_3DO_MESH_TRIANGLES 500
+#define ED_3DO_MESH_VERTICES 512
+#define ED_TERRAIN_MESH_TRIANGLES 160 // 480 unwelded vertices; leave headroom for editing.
+static_assert(ED_TERRAIN_MESH_TRIANGLES<=ED_3DO_MESH_TRIANGLES && ED_TERRAIN_MESH_TRIANGLES*3<=ED_3DO_MESH_VERTICES);
 #define ED_SPAWNS 32
 #define ED_SELECTIONS 256
 #define ED_OBJECTS (32000-640-32) /* runtime thing table, including gameplay reserve */
@@ -31,15 +35,15 @@ typedef struct {char key[32],value[128];} EdTemplateParam;
 typedef struct {char name[64],parent[64];int count;EdTemplateParam params[ED_TEMPLATE_PARAMS];} EdTemplate;
 typedef struct { double x,y,z; } EdVec;
 typedef struct { EdVec point,normal,origin,hit; int valid; double maxDistance; } EdDragTrace;
-typedef struct { EdVec p; double u,v,light; } EdVertex;
+typedef struct { EdVec p; double u,v,light; EdVec lightRGB; } EdVertex;
 typedef struct {
     unsigned int surfaceFlags,faceFlags,adjoinFlags;
     int geometryMode,textureMode,lightingMode,portal;
     double uScale,vScale,extraLight,adjoinDistance;
 } EdSurfaceAttributes;
-typedef struct { int count,material,neighbor,mirror; double uOffset,vOffset; EdVertex v[ED_VERTS]; int hasAttributes;EdSurfaceAttributes attributes; double uvRotation; int customUV; int decalId; } EdFace;
+typedef struct { int count,material,neighbor,mirror; double uOffset,vOffset; EdVertex v[ED_VERTS]; int hasAttributes;EdSurfaceAttributes attributes; double uvRotation; int customUV; int decalId; int bakedLight; } EdFace;
 typedef struct { int count; EdBuffer<EdFace> f; double ambientLight,extraLight; unsigned int flags; EdVec tint,thrust; char sound[32]; double soundVolume,tolerance; char colormap[128],layer[64]; int splineId,arrayId; } EdCell;
-typedef struct {char name[32];EdVec origin;int saved,terrain;EdVec terrainNormal;int terrainGroup;char paintSlots[2][128];} EdAsset;
+typedef struct {char name[32];EdVec origin;int saved,terrain;int lightBaker;EdVec terrainNormal;int terrainGroup;char paintSlots[2][128];} EdAsset;
 #define ED_PAINT_LAYERS 64
 typedef struct {char material[128];EdBuffer<double> weights;} EdPaintLayer;
 typedef struct {int asset;EdCell geometry;EdBuffer<unsigned char> terrainPinned;EdBuffer<EdVec> terrainNormals;EdBuffer<EdPaintLayer> paint;} EdMesh;
@@ -51,7 +55,7 @@ typedef struct {EdVec position,rotation;} EdFrame;
 typedef struct {int frameCount,hasFlags,pathOverride;unsigned int flags;EdFrame frames[ED_FRAMES];int aiFrames,hasVelocity;EdVec velocity;char aiClass[32];} EdThingAttributes;
 typedef struct { EdVec position,rotation; EdThingAttributes attributes;} EdSpawn;
 typedef struct {char templateName[64];EdVec position,rotation;EdThingAttributes attributes;} EdObject;
-typedef struct {int type;EdVec position;double intensity,range;} EdLight;
+struct EdLight {int type;EdVec position;double intensity,range; EdVec color={1,1,1};};
 typedef struct {int line,cd,level,cutscene,lightPower,darkPower,gotoA,gotoB;char file[32],title[96],intro[20][160];} EdEpisodeRow;
 typedef struct {char title[96];int type,count,current;EdEpisodeRow rows[ED_EPISODE_ROWS];} EdEpisode;
 enum {ED_COG_FLEX=2,ED_COG_THING=3,ED_COG_TEMPLATE=4,ED_COG_SECTOR=5,ED_COG_SURFACE=6,ED_COG_KEYFRAME=7,ED_COG_SOUND=8,ED_COG_COG=9,ED_COG_MATERIAL=10,ED_COG_VECTOR=11,ED_COG_MODEL=12,ED_COG_AI=13,ED_COG_INT=14};
@@ -66,10 +70,12 @@ typedef struct {
 #define ED_SPLINE_POINTS 128
 #define ED_SPLINE_SECTORS 256
 typedef struct {EdVec position,handle;} EdSplinePoint;
-typedef struct {int id,count,sides,segments,material,closed,mirrorAxes,groupId;double width,height;unsigned int geometryHash;EdBuffer<EdSplinePoint> points;int invalid,textureHeight;EdBuffer<EdCell> cutBefore,cutAfter,preview;} EdSpline;
+typedef struct {int id,count,sides,segments,material,closed,mirrorAxes,groupId;int makeWalkstruct;char walkstructName[32];double width,height;unsigned int geometryHash,sectorFlags,sectorFlagsMask;int hasSectorTint;EdVec sectorTint;EdBuffer<EdSplinePoint> points;int invalid,textureHeight;EdBuffer<EdCell> cutBefore,cutAfter,preview;} EdSpline;
 struct EdSectorGroup {char name[64]={};int count=0,direction=2,copies=0;EdBuffer<EdCell> cells;};
 struct EdDecalMaterial {char name[32]={};std::shared_ptr<const std::vector<unsigned char>> data;};
 typedef struct { int count; EdVec spawn; int spawnCount; EdSpawn spawns[ED_SPAWNS]; EdLevelHeader header; int objectCount;EdBuffer<EdObject> objects;int lightCount;EdBuffer<EdLight> lights;EdEpisode episode;int cogCount;EdBuffer<EdPlacedCog> cogs;int assetCount,meshCount;EdBuffer<EdAsset> assets;EdBuffer<EdMesh> meshes;int templateCount;EdBuffer<EdTemplate> templates;EdBuffer<EdCell> c; int splineCount;EdBuffer<EdSpline> splines;int decalCount;EdBuffer<EdDecalMaterial> decals;int groupCount;EdBuffer<EdSectorGroup> groups; } EdModel;
+int edGenerateDestructible(EdModel*,const EdBuffer<unsigned char>&,const char*);
+int edGenerateLift(EdModel*,int,const char*,const EdPlacedCog&,int startAtTop=0);
 int edGroupsValidate(const EdModel*);
 int edGroupCapture(EdModel*,const EdBuffer<unsigned char>&,const char*);
 int edGroupArray(EdModel*,const EdModel*,int,int,int);
@@ -83,6 +89,7 @@ int edSplineRebuild(EdModel *out,const EdModel *source,const EdSpline *spline,in
 void edSplineReconcile(EdModel *m);
 int edSplineConvert(EdModel *m,int id);
 int edSplineValidate(const EdModel *m);
+int edSplineRepairWalkstructs(EdModel *m);
 void edSplineReadMetadata(EdModel *m,const char *text);
 /* Unused sector capacity is not part of a document or its equality. */
 int edMergeSectors(EdModel *model,const EdBuffer<unsigned char>& selected,int *merged);
@@ -91,11 +98,12 @@ unsigned int edCellHash(const EdCell *cell);
 int edCellsEqual(const EdCell *a,const EdCell *b);
 int edModelsEqual(const EdModel *a,const EdModel *b);
 inline int edCompare(const EdModel* a,const EdModel* b,size_t) {return !edModelsEqual(a,b);}
-inline int edCompare(const EdLight* a,const EdLight* b,size_t bytes) {for(size_t i=0;i<bytes/sizeof(EdLight);i++)if(a[i].type!=b[i].type||a[i].position.x!=b[i].position.x||a[i].position.y!=b[i].position.y||a[i].position.z!=b[i].position.z||a[i].intensity!=b[i].intensity||a[i].range!=b[i].range)return 1;return 0;}
+inline int edCompare(const EdLight* a,const EdLight* b,size_t bytes) {for(size_t i=0;i<bytes/sizeof(EdLight);i++)if(a[i].type!=b[i].type||a[i].position.x!=b[i].position.x||a[i].position.y!=b[i].position.y||a[i].position.z!=b[i].position.z||a[i].intensity!=b[i].intensity||a[i].range!=b[i].range||a[i].color.x!=b[i].color.x||a[i].color.y!=b[i].color.y||a[i].color.z!=b[i].color.z)return 1;return 0;}
 inline int edCompare(const EdCell* a,const EdCell* b,size_t) {return !edCellsEqual(a,b);}
 
 typedef struct { int cell,face,vertex,edge; double distance; EdVec point; } EdHit;
 typedef struct { int count; EdHit hits[ED_SELECTIONS]; } EdSelection;
+int edTerrainRemovePaint(EdModel*,int asset,int material);
 int edTerrainCreate(EdModel *out,const EdModel *source,const EdSelection *surfaces,const char *name);
 int edTerrainPaint(EdModel*,int,EdVec,double,double,const char*,const char*(*)(int));
 int edPaintValid(const EdModel*);
@@ -118,13 +126,13 @@ int edTemplatesValidate(const EdModel *m);
 int edTemplateIndex(const EdModel *m,const char *name);
 int edMeshValidate(const EdModel *m);
 int edMeshPrimitiveDetail(EdModel *m,int asset,int primitive,EdVec center,int material,int detail);
-int edMeshPrimitiveTransformedDetail(EdModel *m,int asset,int primitive,EdVec center,int material,double size,double degrees,int detail);
+int edMeshPrimitiveTransformedDetail(EdModel *m,int asset,int primitive,EdVec center,int material,double size,double degrees,int detail,double grid=ED_GRID);
 int edMeshPrimitive(EdModel *m,int asset,int primitive,EdVec center,int material);
 int edMeshPrimitiveTransformed(EdModel *m,int asset,int primitive,EdVec center,int material,double size,double degrees);
 int edMeshRay(const EdModel *m,int asset,EdVec origin,EdVec direction,int handles,EdHit *hit);
-int edMeshCleave(EdModel *m,EdHit hit,EdVec a,EdVec b);
-int edMeshExtrude(EdModel *m,EdHit hit);
-int edMeshMoveConstrained(EdModel *m,const EdModel *source,const EdSelection *selection,EdVec delta,int freeMovement);
+int edMeshCleave(EdModel *m,EdHit hit,EdVec a,EdVec b,double grid=ED_GRID*.5);
+int edMeshExtrude(EdModel *m,EdHit hit,double grid=ED_GRID);
+int edMeshMoveConstrained(EdModel *m,const EdModel *source,const EdSelection *selection,EdVec delta,int freeMovement,double grid=ED_GRID);
 int edMeshMove(EdModel *m,const EdModel *source,const EdSelection *selection,EdVec delta);
 EdVec edV(double x,double y,double z);
 EdVec edAdd(EdVec a,EdVec b);
@@ -136,7 +144,7 @@ EdVec edNormal(const EdFace *f);
 EdSurfaceAttributes edSurfaceAttributes(const EdFace *face);
 EdVec edSnapPoint(EdVec p);
 EdVec edSnapFacePoint(const EdFace *face,EdVec p);
-EdVec edSnapMeshFacePoint(const EdFace *face,EdVec p);
+EdVec edSnapMeshFacePoint(const EdFace *face,EdVec p,double grid=ED_GRID*.5);
 void edMapFace(EdFace *face);
 int edStitchTexture(EdFace *target,const EdFace *source);
 void edShiftFaceUV(EdFace *face,EdVec movement);
@@ -154,7 +162,9 @@ EdVec edDragDelta(EdVec startOrigin,EdVec startDirection,EdVec origin,EdVec dire
 EdVec edSurfaceDragDelta(EdVec delta,EdVec normal);
 void edDefault(EdModel *m);
 int edContains(const EdCell *c,EdVec p);
-int edValidate(const EdModel *m);
+// validatedSource must already be valid; only byte-for-field identical cells
+// reuse its validation. All changed cells and document metadata are checked.
+int edValidate(const EdModel *m,const EdModel *validatedSource=nullptr);
 void edClearGeometryError(void);
 const char *edGeometryFailure(void);
 int edVertexLimitHit(void);
@@ -164,6 +174,7 @@ int edRaySelection(const EdModel *m,EdVec origin,EdVec direction,EdHit *hit);
 /* Paint visible adjoins while passing through invisible portal faces. */
 int edRayMaterial(const EdModel *m,EdVec origin,EdVec direction,EdHit *hit);
 double edVertexLight(const EdModel *model,int cell,int face,int vertex);
+int edCleaveFacePlane(EdModel *m,int cell,int face,EdVec normal,EdVec point);
 int edCleave(EdModel *m,int cell,int face,EdVec start,EdVec end);
 int edShapePoints(const EdFace *face,EdVec center,double radius,int sides,double degrees,EdVec points[32]);
 /* Shared by preview and cleave. Returns 1 for an area intersection, 0 for no
@@ -171,6 +182,7 @@ int edShapePoints(const EdFace *face,EdVec center,double radius,int sides,double
 int edClipShape(const EdFace *face,EdVec center,double radius,int sides,double degrees,EdFace *outline);
 int edCleaveShape(EdModel *m,int cell,int face,EdVec center,double radius,int sides);
 int edCleaveShapeRotated(EdModel *m,int cell,int face,EdVec center,double radius,int sides,double degrees);
+int edCleaveSectorShape(EdModel*,int cell,int face,EdVec center,double radius,int sides,double degrees);
 int edCleaveSector(EdModel *m,int cell,int face,EdVec start,EdVec end);
 int edCleaveSectorsPlane(EdModel *model,const EdBuffer<unsigned char>& selected,EdVec normal,EdVec point);
 int edTracePlane(EdVec origin,EdVec direction,EdVec point,EdVec normal,EdVec *hit);
@@ -178,7 +190,7 @@ void edDragTraceBegin(EdDragTrace *trace,EdVec origin,EdVec direction,EdVec poin
 /* Carry the reference plane with player travel so walking past the original
    surface never loses the grab. Ray intersections supply cursor motion. */
 EdVec edDragTraceStep(EdDragTrace *trace,EdVec origin,EdVec direction);
-EdVec edVertexEdgeDelta(const EdModel *m,EdHit hit,EdVec delta);
+EdVec edVertexEdgeDelta(const EdModel *m,EdHit hit,EdVec delta,double grid=ED_GRID);
 int edVertexSlideAxis(const EdModel *m,EdHit hit,EdVec *axis);
 int edExtrude(EdModel *m,int cell,int face,EdVec delta);
 int edMove(EdModel *m,const EdModel *original,EdHit selection,EdVec delta);
@@ -193,7 +205,7 @@ int edExtrudeSelection(EdModel *m,const EdSelection *selection);
 int edExtrudeSelectionHorizontal(EdModel *m,const EdSelection *selection);
 int edSelectionToggle(const EdModel *m,EdSelection *selection,EdHit hit);
 void edSelectionRemap(const EdModel *from,const EdModel *to,const EdSelection *selection,EdVec delta,EdSelection *result);
-int edResolve(EdModel *m);
+int edResolve(EdModel *m,int useBounds=1,const EdModel *validatedSource=nullptr);
 int edDeleteSector(EdModel *model,int sector);
 /* Dissolve a redundant coplanar edge or vertex, preserving a closed convex
    boundary. Failure leaves the model unchanged. */
@@ -207,4 +219,6 @@ int edCogParamValue(const EdModel *model,const EdCogParam *param,char value[32])
 int edCogSetValue(const EdModel *model,EdCogParam *param,const char *value);
 void edCogThingChanged(EdModel *model,int index,int inserted);
 int edCogDelete(EdModel *model,int index);
+int edMeshDissolve(EdModel*,EdHit);
+void edComputeVertexLights(const EdModel*,std::vector<double>&);
 #endif

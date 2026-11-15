@@ -3,6 +3,7 @@
 
 #include "Primitives/rdModel3.h"
 #include "Engine/rdroid.h"
+#include "Engine/rdThing.h"
 #include "World/sithWorld.h"
 #include "World/sithThing.h"
 #include "General/stdConffile.h"
@@ -270,4 +271,32 @@ rdModel3 *sithModel_ReplaceEditor(const char *name,rdModel3 *owned){
     if(w->numModels>=w->sizeModels)return NULL;
     if(existing)sithModel_RemapEditorContacts(w,existing,NULL);
     stdHashtbl_Remove(sithModel_hashtable,name);return sithModel_RegisterEditor(name,owned);
+}
+
+/* Keep the source resource intact when a level overrides a game/mod model. */
+rdModel3 *sithModel_OverrideEditor(const char *name,rdModel3 *owned){
+    SithWorld *w=sithWorld_g_pCurrentWorld;
+    if(!w||!w->aModels||w->numModels>=w->sizeModels)return NULL;
+    rdModel3 *previous=sithModel_Find(name);stdHashtbl_Remove(sithModel_hashtable,name);
+    rdModel3 *result=sithModel_RegisterEditor(name,owned);
+    if(!result&&previous)stdHashtbl_Add(sithModel_hashtable,previous->filename,previous);
+    return result;
+}
+void sithModel_BindEditor(const char *name,rdModel3 *model){
+    if(!model)return;
+    SithWorld *worlds[2]={sithWorld_g_pCurrentWorld,sithWorld_g_pStaticWorld};
+    for(int w=0;w<2;w++)if(worlds[w]){
+        SithWorld *world=worlds[w];
+        for(int i=0;i<world->numThingTemplates;i++){
+            rdThing *render=&world->aThingTemplates[i].renderData;
+            if(render->type==RD_THING_MODEL3&&render->model3&&!__strcmpi(render->model3->filename,name))render->model3=model;
+        }
+        for(unsigned int i=0;i<world->numThingsLoaded;i++){
+            rdThing *render=&world->aThings[i].renderData;
+            if(render->type!=RD_THING_MODEL3||!render->model3||render->model3==model||__strcmpi(render->model3->filename,name))continue;
+            sithModel_RemapEditorContacts(world,render->model3,model);
+            rdThing_FreeEntry(render);rdThing_SetModel3(render,model);render->rdFrameNum=0;
+        }
+    }
+    stdHashtbl_Remove(sithModel_hashtable,name);stdHashtbl_Add(sithModel_hashtable,model->filename,model);
 }

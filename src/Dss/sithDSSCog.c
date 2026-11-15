@@ -6,6 +6,7 @@
 #include "World/sithThing.h"
 #include "Devices/sithComm.h"
 #include "Main/Main.h"
+#include "Main/jkEditor.h"
 
 int sithDSSCog_SendMessage(sithCog *a1, int a2, int a3, int a4, int a5, int a6, int a7, flex32_t param0, flex32_t param1, flex32_t param2, flex32_t param3, int a11)
 {
@@ -44,6 +45,13 @@ int sithDSSCog_SendMessage(sithCog *a1, int a2, int a3, int a4, int a5, int a6, 
 
     //printf("%x %x %x %x %x %x %x, %f %f %f %f\n", a7, a1->idx, a3, a5, a, b, a2, param0, param1, param2, param3);
     
+    /* Keep ordinary game messages unchanged. Editor-created placed scripts
+       carry a document identity because their runtime slots are peer-local. */
+    int documentCog = jkEditor_NetCogDocumentId(a1);
+    if (documentCog >= 0) {
+        NETMSG_PUSHS32(0x47434f47);
+        NETMSG_PUSHS32(documentCog);
+    }
     NETMSG_END(DSS_SENDTRIGGER);
 
     if ( a2 == SITH_MESSAGE_TOUCHED )
@@ -68,6 +76,8 @@ int sithDSSCog_ProcessMessage(SithMessage *in_netMsg)
     int linkId; // [esp+28h] [ebp-4h]
     int sourceType; // [esp+30h] [ebp+4h]
     
+    if (in_netMsg->netMsg.msg_size != 34 && in_netMsg->netMsg.msg_size != 42)
+        return 0;
     NETMSG_IN_START(in_netMsg);
 
     linkId = NETMSG_POPS32();
@@ -93,6 +103,12 @@ int sithDSSCog_ProcessMessage(SithMessage *in_netMsg)
     param1 = NETMSG_POPF32();
     param2 = NETMSG_POPF32();
     param3 = NETMSG_POPF32();
+    if (in_netMsg->netMsg.msg_size == 42) {
+        int marker = NETMSG_POPS32();
+        int documentCog = NETMSG_POPS32();
+        if (marker != 0x47434f47 || !(cog = jkEditor_NetDocumentCog(documentCog)))
+            return 0; /* Never turn a missing explicit target into a broadcast. */
+    }
     //printf("%x %x %x %x %x %x %x, %f %f %f %f\n", linkId, cog->idx, senderType, sourceType, senderIdx, sourceIndex, msgid, param0, param1, param2, param3);
     if ( !cog )
     {

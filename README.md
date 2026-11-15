@@ -20,6 +20,17 @@ New single-player levels start with one room and one walkplayer. Multiplayer lev
 
 ## Features
 
+### New in the November 15 release
+
+- Faster terrain sculpting, texture painting, and geometry editing.
+- Editable spline walkstructs, with sector-local collision pieces and automatic mesh splitting for export.
+- Optional JED Light Baker support, including terrain and selected custom model vertex lighting.
+- Destructible wall and top/bottom lift generators in the sector attributes menu.
+- Expanded 3DO editing controls, COG import/editing, and template flag checkboxes.
+- Fixes for multiplayer terrain editing, ambient sound COGs, and model export compatibility.
+
+All multiplayer participants should use the same release.
+
 | Feature | What you can do |
 | --- | --- |
 | **3D level editing** | Select and move surfaces, edges, and vertices; cleave, extrude, weld, and clean up geometry. |

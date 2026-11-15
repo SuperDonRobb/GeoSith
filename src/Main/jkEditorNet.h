@@ -5,7 +5,7 @@
 /* Editor messages have their own bounded, cumulative-ACK stream. This avoids
  * exhausting JK's 32-entry reliable gameplay-message retry queue. */
 #define EN_MAGIC 0x45444e32u
-#define EN_VERSION 8u
+#define EN_VERSION 9u
 #define EN_CHUNK 1400u
 enum {EN_STATE=1,EN_EDIT,EN_HELLO,EN_ACK,EN_UNDO,EN_REDO,EN_REJECT,EN_TERRAIN_LOCK,EN_TERRAIN_LOCK_STATE,EN_TERRAIN_RELEASE,EN_TERRAIN_EDIT};
 typedef struct {uint32_t magic,version,kind,id,revision,gesture,origin,total,raw,hash,offset,length,base;} EditorNetHeader;
@@ -33,6 +33,7 @@ static std::map<std::string,TerrainLease> terrainLeases;
 static std::map<int,uint32_t> terrainCancelled;
 static uint32_t terrainAcceptedRevision;
 static std::string terrainSessionKey;
+static std::string terrainQueuedLockKey;
 static EdModel *terrainSessionBase;
 static int terrainSessionFinishing,terrainLockPending;
 static uint32_t terrainLockToken,terrainLockTime,terrainLeaseRevision,terrainLeaseTime;
@@ -131,7 +132,13 @@ static int netQueueState(EditorNetPeer *peer,int kind,int origin,uint32_t gestur
     auto useBase=[&](const unsigned char *previous,uint32_t size){if(!previous)return;uint32_t deltaLength=0;unsigned char *delta=edNetZipDelta(previous,size,raw,rawLength,&deltaLength);
         if(delta&&deltaLength<packedLength){edFree(packed);packed=delta;packedLength=deltaLength;base=edNetHash(previous,size);}else edFree(delta);};
     useBase(peer->outBase,peer->outSize);
-    if(kind==EN_EDIT||kind==EN_TERRAIN_EDIT)useBase(peer->inBase,peer->inSize);
+    // Approval can delta against the client's own proposal, which already
+    // contains the newly created terrain. Do not send that mesh back in full.
+    if(kind==EN_EDIT||kind==EN_TERRAIN_EDIT||(kind==EN_STATE&&origin==peer->player&&gesture))useBase(peer->inBase,peer->inSize);
+    if(getenv("GEOSITH_NET_CLIENT_TERRAIN_TEST")&&kind==EN_STATE&&gesture&&origin==peer->player&&peer->inBase){
+        if(base!=edNetHash(peer->inBase,peer->inSize)){puts("CLIENT TERRAIN FAIL: approval did not reuse the uploaded proposal");exit(2);}
+        printf("CLIENT TERRAIN APPROVAL: %u compressed bytes, %u raw bytes\n",packedLength,rawLength);fflush(stdout);
+    }
     if(base)netDeltaTransfers++;
     if(!packed){edFree(raw);return 0;}netRawBytes+=rawLength;netPackedBytes+=packedLength;netFreeStream(&peer->tx);peer->tx.bytes=packed;peer->tx.rawBytes=raw;
     peer->lastSnapshot=stdPlatform_GetTimeMsec();peer->tx.h=EditorNetHeader{.kind=(uint32_t)kind,.id=++netSequence,.revision=netRevision,.gesture=gesture,.origin=(uint32_t)origin,.total=packedLength,.raw=rawLength,.hash=edNetHash(raw,rawLength),.base=base};return 1;
@@ -174,8 +181,10 @@ static int netApplyDocument(EditorNetPeer *peer,EditorNetHeader h,const unsigned
     EdModel *incoming=edCalloc(1,sizeof(*incoming));if(!incoming)return 0;if(!edWireDecode(incoming,raw+modelOffset,d.modelBytes)){edFree(incoming);return 0;}
     const char (*names)[128]=(const char (*)[128])(raw+sizeof(d)+(size_t)d.objects*4);const char *manifest=(const char*)names+d.materials*128u;const unsigned char *p=raw+prefix,*end=raw+modelOffset-d.assets;EdResources incomingResources;
     bool sameAssets=customResourceBytes.size()==d.assets&&!memcmp(customResourceBytes.data(),end,d.assets);
-    if(sithNet_isServer&&!sameAssets){edFree(incoming);netReject(peer);return 1;}
+    
     if(!sameAssets&&!EdResources::decode(end,d.assets,incomingResources)){edFree(incoming);return 0;}
+    bool onlyCogResources=!sameAssets&&cogCustomOnlyChanges(customResources,incomingResources);
+    if(sithNet_isServer&&!sameAssets&&!onlyCogResources){edFree(incoming);netReject(peer);return 1;}
     int previousPaletteCount=paletteCount;EdResources previousResources=customResources;bool resourcesChanged=false;char *scripts[ED_COGS]={0};int ok=0;
 {
     if(incoming->count<1||incoming->count>ED_CELLS||incoming->cogCount!=(int)d.cogs||incoming->objectCount!=(int)d.objects||manifest[d.resources-1]||strlen(manifest)!=d.resources-1){netInvalid(__LINE__);goto done;}
@@ -186,9 +195,11 @@ static int netApplyDocument(EditorNetPeer *peer,EditorNetHeader h,const unsigned
         scripts[i]=edAlloc(n);if(!scripts[i]){netInvalid(__LINE__);goto done;}edCopy(scripts[i],p,n);p+=n;
     }if(p!=end){netInvalid(__LINE__);goto done;}
     if(sithNet_isServer&&((h.kind!=EN_TERRAIN_EDIT&&h.revision!=netRevision)||!resources||strcmp(resources,manifest))){netReject(peer);ok=1;{netInvalid(__LINE__);goto done;}}
-    if(!sithNet_isServer&&!sameAssets){
-        setCustomResources(std::move(incomingResources));resourcesChanged=true;resourceForceMaterials=true;liveColormap[0]=0;
-        for(int i=0;i<paletteCount;i++){if(paletteOwned[i]&&palette[i])retiredResourceMaterials.push_back(palette[i]);palette[i]=NULL;paletteOwned[i]=0;}
+    if(!sameAssets){
+        setCustomResources(std::move(incomingResources));resourcesChanged=true;
+        for(auto &f:customResources.files)if(f.first.starts_with("cog/")){auto old=previousResources.files.find(f.first);if(old==previousResources.files.end()||*old->second!=*f.second)if(!cogCustomCompile(f.first.c_str()+4)){netInvalid(__LINE__);goto done;}}
+        if(!onlyCogResources){resourceForceMaterials=true;liveColormap[0]=0;
+        for(int i=0;i<paletteCount;i++){if(paletteOwned[i]&&palette[i])retiredResourceMaterials.push_back(palette[i]);palette[i]=NULL;paletteOwned[i]=0;}}
         cogSourceCount=0;
     }
     if(!sithNet_isServer&&(!netHadState||!resources||strcmp(resources,manifest))&&!loadMissingManifestTemplates(manifest)){netInvalid(__LINE__);goto done;}
@@ -208,6 +219,7 @@ static int netApplyDocument(EditorNetPeer *peer,EditorNetHeader h,const unsigned
     /* Joining uses a temporary bootstrap GOB. Offer the host's authored name
        when saving a copy, rather than that internal bootstrap filename. */
     if(!sithNet_isServer&&initial&&strlen(incoming->header.title)<32){char16_t proposed[32];char filename[32];stdString_CharToWchar(proposed,incoming->header.title,32);if(editorLevelFilename(proposed,filename))stdString_SafeWStrCopy(levelName,proposed,32);}
+    bool restartResourceCogs=resourcesChanged&&!active&&edModelsEqual(incoming,model);
     netApplying=1;
     if(sithNet_isServer){
         EdModel published=*model;if(terrainSessionBase)edTerrainOverlay(&published,terrainSessionBase,terrainSessionKey);
@@ -244,12 +256,13 @@ static int netApplyDocument(EditorNetPeer *peer,EditorNetHeader h,const unsigned
     netApplying=0;
     /* Joining applies the snapshot inside the synchronization menu. It has no
        stale attribute draft to discard and must stay open until DSS_WELCOME. */
+    if(ok&&restartResourceCogs)startPlacedCogs(model);
     if(ok&&jkMain_bInModalGui&&!(g_submodeFlags&8)&&!netSafeDialog){jkGuiRend_CancelActiveMenu();say("The level changed while this draft was open. Reopen it to edit the current level.");}
 }
 done:if(!ok&&resourcesChanged)setCustomResources(std::move(previousResources));if(ok&&(resourcesChanged||paletteCount!=previousPaletteCount))materialMetadata();for(int i=0;i<ED_COGS;i++)edFree(scripts[i]);edFree(incoming);return ok;
 }
 static char *netCogSource(const char *name){for(int i=0;i<netCogCount;i++)if(!__strcmpi(netCogNames[i],name)){size_t n=strlen(netCogTexts[i])+1;char *copy=edAlloc(n);if(copy)edCopy(copy,netCogTexts[i],n);return copy;}return NULL;}
-static void netControlReady(SithThing *player){if(!netNeedsEditorSetup||!netClient()||(g_submodeFlags&8))return;netNeedsEditorSetup=0;savedPhysics=player->physicsParams.flags;savedDebug=g_debugmodeFlags;savedThingFlags=player->flags;player->flags|=SITH_TF_INVULN;setEditorFlight(player,0);for(int i=1;i<=10;i++){sithInventory_SetInventoryAvailable(player,i,1);sithInventory_SetInventory(player,i,100);}sithWeapon_SelectWeapon(player,tool,0);sithCamera_SetCurrentCamera(&sithCamera_g_aCameras[0]);}
+static void netControlReady(SithThing *player){if(!netNeedsEditorSetup||!netClient()||(g_submodeFlags&8))return;netNeedsEditorSetup=0;savedPhysics=player->physicsParams.flags;savedDebug=g_debugmodeFlags;savedThingFlags=player->flags;player->flags|=SITH_TF_INVULN;setEditorFlight(player,0);editorGrantTools(player);sithWeapon_SelectWeapon(player,tool,0);sithCamera_SetCurrentCamera(&sithCamera_g_aCameras[0]);}
 int jkEditor_NetMessage(SithMessage *message)try {
     if(!netEnabled()||message->netMsg.msg_size<sizeof(EditorNetHeader)||message->netMsg.msg_size>sizeof(message->pktData))return 0;
     EditorNetHeader h;for(size_t i=0;i<sizeof(h)/4;i++){uint32_t n=edNetLoad32((unsigned char*)message->pktData+i*4);edCopy((unsigned char*)&h+i*4,&n,4);}int sender=message->netMsg.idx;
@@ -279,7 +292,7 @@ int jkEditor_NetMessage(SithMessage *message)try {
             const unsigned char *base=NULL;uint32_t baseSize=0;
             auto matchBase=[&](const unsigned char *data,uint32_t size){if(!base&&data&&edNetHash(data,size)==h.base){base=data;baseSize=size;}};
             matchBase(peer->inBase,peer->inSize);
-            if(sithNet_isServer&&(h.kind==EN_EDIT||h.kind==EN_TERRAIN_EDIT)){matchBase(peer->outBase,peer->outSize);matchBase(peer->tx.rawBytes,peer->tx.h.raw);}
+            matchBase(peer->outBase,peer->outSize);matchBase(peer->tx.rawBytes,peer->tx.h.raw);
             if(!base){edFree(raw);raw=NULL;}else for(uint32_t i=0;i<h.raw;i++)raw[i]^=i<baseSize?base[i]:0;
         }
         int ok=raw&&edNetHash(raw,h.raw)==h.hash&&netApplyDocument(peer,h,raw,h.raw);if(ok){edFree(peer->inBase);peer->inBase=raw;peer->inSize=h.raw;raw=NULL;}edFree(raw);if(!ok){if(sithNet_isServer)netReject(peer);else{netReady=0;if(++netValidationFailures>=3){netFatal=1;say(netFailureReason[0]?netFailureReason:"Level synchronization failed repeatedly. Check matching game files and GeoSith versions.");}else say("Level validation failed; requesting a complete fresh copy.");}netFreeStream(rx);return 0;}}

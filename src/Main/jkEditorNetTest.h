@@ -4,11 +4,29 @@ extern "C" {
 #include "Gui/jkGUIMultiplayer.h"
 #include "Dss/sithDSSThing.h"
 #include "Dss/jkDSS.h"
+#include "Dss/sithDSSCog.h"
 #include "Devices/sithSoundMixer.h"
 extern char jkGuiMultiplayer_ipText_conv[256];
 extern int jkGuiNetHost_portNum;
 }
 #include "Dss/sithDSSSoundIdentity.h"
+static int netTestDestructibleTrigger(SithMessage *message){
+    short cog;int guid;memcpy(&cog,(char*)message->pktData+4,2);memcpy(&guid,(char*)message->pktData+8,4);
+    printf("FRACTURE trigger cog=%d guid=%d server=%d\n",cog,guid,sithNet_isServer);fflush(stdout);return sithDSSCog_ProcessMessage(message);
+}
+static int netTestDestructibleCreate(SithMessage *message){
+    int marker,expected;memcpy(&marker,(char*)message->pktData+2,4);
+    unsigned legacy=marker<0?38:10;memcpy(&expected,(char*)message->pktData+legacy-4,4);
+    rdVector3 position={};if(marker<0){float xyz[3];memcpy(xyz,(char*)message->pktData+10,12);position={xyz[0],xyz[1],xyz[2]};}
+    SithMessage invalid=*message;invalid.netMsg.msg_size=9;if(sithDSSThing_ProcessCreateThing(&invalid))exit(2);
+    if(marker<0){invalid=*message;float bad=NAN;memcpy((char*)invalid.pktData+10,&bad,4);if(sithDSSThing_ProcessCreateThing(&invalid))exit(2);}
+    int ok=sithDSSThing_ProcessCreateThing(message);SithThing *thing=sithThing_GetGuidThing(expected);
+    if(!ok||!thing||(marker<0&&edDot(edSub(vec(thing->position),vec(position)),edSub(vec(thing->position),vec(position)))>1e-8)){
+        printf("GEOSITH_NET_DESTRUCTIBLE CREATE FAIL expected GUID=%d marker=%d pos=(%g,%g,%g) found=%p\n",expected,marker,position.x,position.y,position.z,(void*)thing);fflush(stdout);exit(2);
+    }
+    if(thing->type==SITH_THING_DEBRIS&&thing->msecLifeLeft!=4000){printf("GEOSITH_NET_DESTRUCTIBLE lifetime FAIL: %d\n",thing->msecLifeLeft);fflush(stdout);exit(2);}
+    return ok;
+}
 static unsigned netTestSoundMask;
 static int netTestSoundMessage(SithMessage *message){
     unsigned flags=0,ref=0;memcpy(&flags,message->pktData,4);
@@ -93,7 +111,7 @@ static int stressNetwork(SithThing *player){
             /* Static GUIDs need not equal local allocation slots after a join. */
             jkPlayer_playerInfos[0].pLocalPlayer->guid=100001;jkPlayer_playerInfos[1].pLocalPlayer->guid=100000;sithWorld_g_pCurrentWorld->aThings[objectThings[0]].guid=1;
             }
-            if(getenv("GEOSITH_NET_TERRAIN_SESSION_TEST")){for(int f=0;f<model->c[0].count;f++)if(model->c[0].f[f].neighbor<0&&edNormal(&model->c[0].f[f]).z>.9){picks.count=1;picks.hits[0]={0,f,-1,-1};if(!terrainCreate())exit(2);break;}}
+            if(getenv("GEOSITH_NET_TERRAIN_SESSION_TEST")&&!getenv("GEOSITH_NET_CLIENT_TERRAIN_TEST")){for(int f=0;f<model->c[0].count;f++)if(model->c[0].f[f].neighbor<0&&edNormal(&model->c[0].f[f]).z>.9){picks.count=1;picks.hits[0]={0,f,-1,-1};if(!terrainCreate())exit(2);break;}}
             jkDSS_SendSaberInfo_alt(player,(char*)"kyb3.3do",(char*)"kymp4.snd",(char*)"saberblue1.mat",(char*)"saberblue0.mat");grabbing=objectGrabbing=1;char bootstrap[32]="";if(!jkEditor_NetPrepareJoin(bootstrap,sithWorld_g_pCurrentWorld->map_jkl_fname,JKEDITOR_NET_FLAG))exit(2);char path[512];netTestPath(path,"bootstrap.name");FILE *f=fopen(path,"wb");if(!f)exit(2);fprintf(f,"%s",bootstrap);fclose(f);netTestMark("host.ready",netRevision);
         }else{if(!stdComm_GNS_TestDiscovery())exit(2);snprintf(jkGuiMultiplayer_ipText_conv,256,"127.0.0.1:27020");if(stdComm_Open(0,u"geosith-network-test"))exit(2);sithMulti_StartupClient();sithNet_serverNetId=0;
             /* The connection screen has no local player until DSS_WELCOME.
@@ -140,6 +158,31 @@ static int stressNetwork(SithThing *player){
     }
     sithNet_isServer=netTestRole==1;if(netTestRole==1)sithNet_serverNetId=1;
     if(netTestRole==1){int oldLevel=jkMain_bLevelActive,oldModal=jkMain_bInModalGui;jkMain_bLevelActive=1;jkMain_bInModalGui=1;jkMain_NetworkTick();jkMain_bInModalGui=oldModal;jkMain_bLevelActive=oldLevel;}else sithMessage_ProcessMessages();
+    if(getenv("GEOSITH_NET_COG_EXTERNAL_TEST")){
+        static int phase;const char *name="zz_network_custom.cog";std::string first="symbols\nint value=3\nint result=0 local\nmessage startup\nend\ncode\nstartup:\nresult=value+10;\nreturn;\nend\n";
+        EditorNetPeer *a=netPeer(2,0),*b=netPeer(3,0);
+        if(netTestRole==1&&!phase&&a&&b&&a->ready==(int)netRevision&&b->ready==(int)netRevision){netTestMark("cog.ready",1);phase=1;}
+        if(netTestRole==2&&!phase&&netTestMarker("cog.ready")&&!netEditPending()){if(!cogPublishCustom(name,first))exit(2);phase=1;}
+        if(customResources.files.count("cog/zz_network_custom.cog")&&!netEditPending()){
+            discoverCogs();int found=0;for(int i=0;i<cogSourceCount;i++)found|=!strcmp(cogSources[i].file,name);if(!found)exit(2);
+            char marker[40];snprintf(marker,40,"cog.library%d",netTestRole);netTestMark(marker,1);
+        }
+        if(netTestRole==2&&phase==1&&netTestMarker("cog.library1")&&netTestMarker("cog.library2")&&netTestMarker("cog.library3")){
+            EdPlacedCog placed;if(!loadPlacedCog(name,&placed))exit(2);strcpy(placed.params[0].value,"9");edCopyModel(candidate,model);candidate->cogs[candidate->cogCount++]=placed;remember();if(!commit())exit(2);phase=2;
+        }
+        int placed=-1;for(int i=0;i<model->cogCount;i++)if(!strcmp(model->cogs[i].file,name))placed=i;
+        if(placed>=0&&!netEditPending()){char marker[40];snprintf(marker,40,"cog.placed%d",netTestRole);netTestMark(marker,1);}
+        if(netTestRole==1&&phase==1&&netTestMarker("cog.placed1")&&netTestMarker("cog.placed2")&&netTestMarker("cog.placed3")){
+            std::string changed=first;changed.replace(changed.find("+10"),3,"+20");if(!cogPublishCustom(name,changed))exit(2);phase=2;
+        }
+        auto source=customResources.files.find("cog/zz_network_custom.cog");
+        if(placed>=0&&source!=customResources.files.end()&&!netEditPending()&&std::string(source->second->begin(),source->second->end()).find("+20")!=std::string::npos){
+            if(phase<3){active=0;if(!startPlacedCogs(model))exit(2);sithCog *c=&sithWorld_g_pCurrentWorld->aCogs[ownedCogSlots[placed]];SithCogSymbol *result=(c->pSymbolTable->numUsedSymbols>1?&c->pSymbolTable->aSymbols[1]:NULL);if(!result||(result->val.type==SITHCOG_VALUE_FLOAT?(int)result->val.dataAsFloat[0]:(int)result->val.data[0])!=29)exit(2);active=1;suspendPlacedCogs(0);phase=3;}
+            char marker[40];snprintf(marker,40,"cog.updated%d",netTestRole);netTestMark(marker,1);
+        }
+        if(netTestMarker("cog.updated1")&&netTestMarker("cog.updated2")&&netTestMarker("cog.updated3")){puts("GEOSITH_NET_COG_EXTERNAL PASS: client imported library, selectable on all peers, placed values preserved, host source edit compiled and executed everywhere");fflush(stdout);exit(0);}
+        if(stdPlatform_GetTimeMsec()-netTestStart>120000)exit(2);sithNet_isMulti=0;sithMessage_g_outputstream&=~1;sithMessage_g_inputstream&=~1;return 1;
+    }
     if(getenv("GEOSITH_NET_EDITOR_LOOK_TEST")){
         static int checked;
         if(!checked){
@@ -183,6 +226,40 @@ static int stressNetwork(SithThing *player){
         }
         if(stdPlatform_GetTimeMsec()-netTestStart>(getenv("GEOSITH_NET_TIMEOUT_MS")?(unsigned)atoi(getenv("GEOSITH_NET_TIMEOUT_MS")):90000)){printf("GEOSITH_NET_CLIENT_DECAL FAIL role=%d decals=%d ready=%d busy=%d phase=%d rejections=%u\n",netTestRole,model->decalCount,netReady,netBusy,phase,netRejections);fflush(stdout);exit(2);}
         sithNet_isMulti=0;sithMessage_g_outputstream&=~1;sithMessage_g_inputstream&=~1;return 1;
+    }
+    if(getenv("GEOSITH_NET_LIFT_TEST")&&getenv("GEOSITH_NET_LEVEL")){
+        static int prepared;char marker[40];snprintf(marker,sizeof(marker),"lift.ready%d",netTestRole);
+        if(!prepared){
+            if(model->cogCount!=1||model->objectCount!=1||model->objects[0].attributes.frameCount!=2)exit(2);
+            leaveEditor(sithWorld_g_pCurrentWorld->pLocalPlayer);prepared=1;netTestMark(marker,1);
+        }
+        jkEditor_NetTick();SithThing *lift=&sithWorld_g_pCurrentWorld->aThings[objectThings[0]];
+        if(lift->moveType!=SITH_MT_PATH||lift->trackParams.loadedFrames!=2)exit(2);
+        if(netTestRole==2&&!netTestMarker("lift.step")&&netTestMarker("lift.ready1")&&netTestMarker("lift.ready2")&&netTestMarker("lift.ready3")){
+            sithCog_ThingSendMessage(lift,sithWorld_g_pCurrentWorld->pLocalPlayer,SITH_MESSAGE_ENTERED);netTestMark("lift.step",1);
+        }
+        if(lift->goalframe==1&&lift->trackParams.flags){snprintf(marker,sizeof(marker),"lift.moving%d",netTestRole);netTestMark(marker,1);}
+        if(netTestMarker("lift.moving1")&&netTestMarker("lift.moving2")&&netTestMarker("lift.moving3")){
+            puts("GEOSITH_NET_LOADED PASS: lift model, frames and stock COG; client step-on starts motion on all peers");fflush(stdout);exit(0);
+        }
+        if(stdPlatform_GetTimeMsec()-netTestStart>60000){printf("GEOSITH_NET_LIFT FAIL role=%d goal=%d flags=%x\n",netTestRole,lift->goalframe,lift->trackParams.flags);fflush(stdout);exit(2);}return 1;
+    }
+    if(getenv("GEOSITH_NET_DESTRUCTIBLE_TEST")&&getenv("GEOSITH_NET_LEVEL")){
+        static int prepared;char ready[40];snprintf(ready,sizeof(ready),"fracture.ready%d",netTestRole);
+        sithMessage_RegisterFunction(DSS_SENDTRIGGER,netTestDestructibleTrigger);sithMessage_RegisterFunction(DSS_CREATETHING,netTestDestructibleCreate);
+        if(!prepared){
+            if(model->cogCount!=1||model->assetCount!=13||model->objectCount!=1)exit(2);
+            leaveEditor(sithWorld_g_pCurrentWorld->pLocalPlayer);prepared=1;netTestMark(ready,1);printf("FRACTURE ready role=%d cog=%d guid=%d flags=%x links=%d server=%d\n",netTestRole,ownedCogSlots[0],sithWorld_g_pCurrentWorld->aThings[objectThings[0]].guid,sithWorld_g_pCurrentWorld->aThings[objectThings[0]].flags,sithCog_numThingLinks,sithNet_serverNetId);fflush(stdout);
+        }
+        jkEditor_NetTick();
+        if(netTestRole==(getenv("GEOSITH_NET_DESTRUCTIBLE_CLIENT_HIT")?2:1)&&!netTestMarker("fracture.hit")&&netTestMarker("fracture.ready1")&&netTestMarker("fracture.ready2")&&netTestMarker("fracture.ready3")){
+            SithThing *wall=&sithWorld_g_pCurrentWorld->aThings[objectThings[0]];
+            sithThing_DamageThing(wall,sithWorld_g_pCurrentWorld->pLocalPlayer,10,SITH_DAMAGE_SABER);netTestMark("fracture.hit",1);
+        }
+        int debris=0;SithWorld *w=sithWorld_g_pCurrentWorld;for(int i=0;i<w->numThingsLoaded;i++)debris+=w->aThings[i].type==SITH_THING_DEBRIS;
+        if(debris==12&&netTestMarker("fracture.hit")){snprintf(ready,sizeof(ready),"fracture.done%d",netTestRole);netTestMark(ready,1);}
+        if(netTestMarker("fracture.done1")&&netTestMarker("fracture.done2")&&netTestMarker("fracture.done3")){puts("GEOSITH_NET_DESTRUCTIBLE PASS: saved models and COG joined; destruction replicated 12 debris to both clients");puts("GEOSITH_NET_LOADED PASS: destructible level synchronized");fflush(stdout);exit(0);}
+        if(stdPlatform_GetTimeMsec()-netTestStart>60000){printf("GEOSITH_NET_DESTRUCTIBLE FAIL role=%d debris=%d active=%d\n",netTestRole,debris,active);fflush(stdout);exit(2);}return 1;
     }
     if(getenv("GEOSITH_NET_LEVEL")){
         if(getenv("GEOSITH_NET_ARRAY_TEST")){

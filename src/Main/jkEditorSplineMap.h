@@ -47,7 +47,7 @@ static int splineMapInput(int left,int right,int space){
 static void splineMapDraw(void){
     int cyan=mapColor(40,210,255),yellow=mapColor(255,220,20);
     for(int i=0;i<model->splineCount;i++){const EdSpline &s=splineDragging&&model->splines[i].id==splineSelected?splineDraft:model->splines[i];int color=s.invalid?mapColor(255,45,45):s.id==splineSelected?yellow:cyan;
-        if(s.invalid)for(size_t c=0;c<s.preview.size();c++)for(int f=0;f<s.preview[c].count;f++){const EdFace &face=s.preview[c].f[f];for(int v=0;v<face.count;v++)mapWorldLine(face.v[v].p,face.v[(v+1)%face.count].p,color,2);}
+        if(s.invalid||s.makeWalkstruct)for(size_t c=0;c<s.preview.size();c++)for(int f=0;f<s.preview[c].count;f++){const EdFace &face=s.preview[c].f[f];for(int v=0;v<face.count;v++)mapWorldLine(face.v[v].p,face.v[(v+1)%face.count].p,color,2);}
         EdVec a=edSplinePosition(&s,0);for(int j=1;j<=(s.closed?s.count:s.count-1)*32;j++){EdVec b=edSplinePosition(&s,j/32.0);mapWorldLine(a,b,color,3);a=b;}
         for(int p=0;p<s.count;p++){mapMarker(s.points[p].position,1,color);if(s.id==splineSelected&&p==splinePoint){EdVec h=splineVisibleHandle(s,p),center=s.points[p].position;mapWorldLine(edSub(center,h),edAdd(center,h),cyan,2);mapMarker(edSub(center,h),0,cyan);mapMarker(edAdd(center,h),0,cyan);}}
         if(splineDrawing&&s.id==splineSelected&&!splineDragging){EdVec end=mapPoint(mapX,mapY);mapWorldLine(s.points[s.count-1].position,end,cyan,1);}

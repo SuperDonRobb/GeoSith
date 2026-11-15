@@ -1,3 +1,4 @@
+#include "edDestructibleScript.h"
 /* Placed COG authoring owns a draft across the temporary world-picking mode. */
 #define EDITOR_COG_SOURCES 2048
 typedef struct {char file[32],archive[260];unsigned int offset,size;} EditorCogSource;
@@ -7,6 +8,16 @@ static int cogSourceCount,cogSelected,cogPage,cogParamPage,cogPickParam=-1,cogPi
 static EditorCogDraft *cogDraft;
 static EdHit cogPickHit;
 static int ownedCogSlots[ED_COGS],ownedCogCount;
+/* Placed COG runtime slots differ after a bootstrap join. The document
+ * ordinal is shared by all peers, unlike those local allocation indices. */
+int jkEditor_NetCogDocumentId(const sithCog *cog){
+    SithWorld *w=sithWorld_g_pCurrentWorld;if(!sithNet_isMulti||!jkEditor_IsLevel()||!model||!w||!cog)return -1;
+    for(int i=0;i<ownedCogCount&&i<model->cogCount;i++)if(ownedCogSlots[i]>=0&&ownedCogSlots[i]<(int)w->numCogs&&cog==&w->aCogs[ownedCogSlots[i]])return i;return -1;
+}
+sithCog *jkEditor_NetDocumentCog(int id){
+    SithWorld *w=sithWorld_g_pCurrentWorld;if(!sithNet_isMulti||!jkEditor_IsLevel()||!model||!w||id<0||id>=model->cogCount||id>=ownedCogCount)return NULL;
+    int slot=ownedCogSlots[id];return slot>=0&&slot<(int)w->numCogs?&w->aCogs[slot]:NULL;
+}
 static uint32_t cogRead32(const unsigned char *p){return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
 static int cogSourceCompare(const void *a,const void *b){return __strcmpi(((const EditorCogSource*)a)->file,((const EditorCogSource*)b)->file);}
 static void addCogSource(const char *file,const char *archive,unsigned int offset,unsigned int size){
@@ -30,7 +41,7 @@ static void discoverCogs(void){
     for(int d=0;d<5;d++){char path[300];snprintf(path,sizeof(path),"%s%scog",jkRes_gCtx.aGobDirectories[d].name,jkRes_gCtx.aGobDirectories[d].name[0]?"/":"");stdFileSearch *search=stdFileUtil_NewFind(path,3,"cog");stdFileSearchResult entry;if(search){while(stdFileUtil_FindNext(search,&entry))if(!entry.is_subdirectory)addCogSource(entry.fpath,NULL,0,0);stdFileUtil_DisposeFind(search);}}
     qsort(cogSources,cogSourceCount,sizeof(cogSources[0]),cogSourceCompare);
 }
-static char *cogSourceText(const char *name){char *networkSource=netCogSource(name);if(networkSource)return networkSource;char path[80];snprintf(path,sizeof(path),"cog\\%s",name);stdFile_t file=jkRes_FileOpen(path,"rb");char *text=NULL;
+static char *cogSourceText(const char *name){if(!__strcmpi(name,"gs_destructible.cog")){char *copy=edAlloc(sizeof(edDestructibleScript));if(copy)memcpy(copy,edDestructibleScript,sizeof(edDestructibleScript));return copy;}auto custom=customResources.files.find(EdResources::path(std::string("cog/")+name));if(custom!=customResources.files.end()){char *copy=edAlloc(custom->second->size()+1);if(copy){memcpy(copy,custom->second->data(),custom->second->size());copy[custom->second->size()]=0;}return copy;}char *networkSource=netCogSource(name);if(networkSource)return networkSource;char path[80];snprintf(path,sizeof(path),"cog\\%s",name);stdFile_t file=jkRes_FileOpen(path,"rb");char *text=NULL;
     if(file){int size=jkRes_FileSize(file);if(size>0&&size<2*1024*1024){text=edAlloc(size+1);if(text){if(jkRes_FileRead(file,text,size)==size)text[size]=0;else{edFree(text);text=NULL;}}}jkRes_FileClose(file);if(text)return text;}
     discoverCogs();for(int i=0;i<cogSourceCount;i++){EditorCogSource *s=&cogSources[i];if(__strcmpi(s->file,name)||!s->archive[0]||!s->size||s->size>2*1024*1024)continue;FILE *f=fopen(s->archive,"rb");if(!f)continue;text=edAlloc(s->size+1);if(text){if(!fseek(f,s->offset,SEEK_SET)&&fread(text,1,s->size,f)==s->size)text[s->size]=0;else{edFree(text);text=NULL;}}fclose(f);if(text)return text;}return NULL;
 }
@@ -61,7 +72,7 @@ static int readPlacedCogs(EdModel *m,const char *text){
     ownedCogCount=m->cogCount;for(int i=0;i<ownedCogCount;i++)ownedCogSlots[i]=i;return 1;
 }
 static int cogPicking(void){return cogDraft&&cogPickParam>=0;}
-int jkEditor_HandleEscape(void){if(active&&terrainSessionOpen()){terrainSessionFinish();return 1;}if(active&&builderAsset>=0){builderExitRequested=1;return 1;}if(active&&mapActive){int editing=splineDrawing||splineDragging||mapCleaveMode||mapDrawing||mapUnplaced||mapDragging||mapBox;if(editing)mapEscape();return editing?1:0;}if(active&&cogPicking()){cogPickCancelled=1;return 1;}return 0;}
+int jkEditor_HandleEscape(void){if(active&&terrainSessionOpen()){terrainSessionFinish();return 1;}if(active&&builderAsset>=0){if(builderInverting){builderInverting=0;say("Mesh invert cancelled.");return 1;}builderExitRequested=1;return 1;}if(active&&mapActive){int editing=splineDrawing||splineDragging||mapCleaveMode||mapDrawing||mapUnplaced||mapDragging||mapBox;if(editing)mapEscape();return editing?1:0;}if(active&&cogPicking()){cogPickCancelled=1;return 1;}return 0;}
 static EdCogParam *pickingCogParam(void){return cogPicking()&&cogSelected<cogDraft->count&&cogPickParam<cogDraft->cogs[cogSelected].count?&cogDraft->cogs[cogSelected].params[cogPickParam]:NULL;}
 static void updateCogPick(EdVec origin,EdVec direction){EdCogParam *param=pickingCogParam();cogPickThing=-10000;cogPickHit.cell=-1;if(!param)return;
     if(param->type==ED_COG_SURFACE||param->type==ED_COG_SECTOR)edRaySelection(model,origin,direction,&cogPickHit);else edRayMaterial(model,origin,direction,&cogPickHit);
@@ -107,6 +118,25 @@ static int chooseCogScript(void){discoverCogs();int page=0,ids[EDITOR_COG_SOURCE
         if(choice>=100&&choice<112&&page*12+choice-100<count)return ids[page*12+choice-100];if(choice==2&&page>0)page--;else if(choice==3&&page+1<pages)page++;else if(choice==4)page=0;else if(choice<0)return -1;
     }
 }
+static std::string cogSoundTestName;
+static void testCogSoundBrowser(jkGuiMenu *menu){static int stage;
+    if(stage==0){stdString_SafeWStrCopy(const_cast<char16_t*>(menu->paElements[1].wstr),u"__no_sound_matches__",64);menu->lastClicked=4;}
+    else if(stage==1){if(menu->paElements[3].wstr[0])exit(2);stdString_CharToWchar(const_cast<char16_t*>(menu->paElements[1].wstr),cogSoundTestName.c_str(),64);menu->lastClicked=4;}
+    else menu->lastClicked=100;stage++;
+}
+static int chooseCogSound(const std::vector<std::string> &files,const char *current){
+    int page=0;for(size_t i=0;i<files.size();i++)if(!__strcmpi(files[i].c_str(),current))page=(int)i/12;
+    std::vector<int> ids(files.size());char16_t query[64]=u"";
+    for(;;){int count=0;for(int i=0;i<(int)files.size();i++)if(materialMatches(files[i].c_str(),query))ids[count++]=i;int pages=(count+11)/12;if(!pages)pages=1;if(page>=pages)page=pages-1;
+        jkGuiElement e[20]={0};char16_t names[12][64],info[96];char text[96];snprintf(text,sizeof(text),"%d sounds | Page %d / %d",count,page+1,pages);stdString_CharToWchar(info,text,96);
+        e[0]=jkGuiElement{ELEMENT_TEXT,0,2,NULL,3,{20,10,600,40},1};e[1]=jkGuiElement{ELEMENT_TEXTBOX,0,0,NULL,63,{20,60,450,30},1};e[2]=jkGuiElement{ELEMENT_TEXTBUTTON,4,0,NULL,3,{480,60,140,30},1};
+        for(int i=0;i<12;i++){e[3+i]=jkGuiElement{ELEMENT_TEXTBUTTON,100+i,0,NULL,3,{20+(i%2)*305,112+(i/2)*43,295,38},page*12+i<count};if(page*12+i<count)stdString_CharToWchar(names[i],files[ids[page*12+i]].c_str(),64);else names[i][0]=0;}
+        e[15]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{20,377,600,25},1};e[16]=jkGuiElement{ELEMENT_TEXTBUTTON,2,2,NULL,3,{20,423,180,40},1};e[17]=jkGuiElement{ELEMENT_TEXTBUTTON,3,2,NULL,3,{440,423,180,40},1};e[18]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{230,423,180,40},1};e[19].type=ELEMENT_END;
+        jkGuiMenu menu={e,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);e[0].wstr=u"Choose Sound";if(getenv("GEOSITH_COG_SOUND_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=testCogSoundBrowser;e[1].wstr=query;e[2].wstr=u"Search";for(int i=0;i<12;i++)e[3+i].wstr=names[i];e[15].wstr=info;e[16].wstr=u"Previous";e[17].wstr=u"Next";
+        jkGuiRend_MenuSetReturnKeyShortcutElement(&menu,&e[2]);jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&e[18]);int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(e);
+        if(choice>=100&&choice<112&&page*12+choice-100<count)return ids[page*12+choice-100];if(choice==2&&page>0)page--;else if(choice==3&&page+1<pages)page++;else if(choice==4)page=0;else if(choice<0)return -1;
+    }
+}
 static int cogChosenParam;
 static void editCogValue(EdCogParam *param){char16_t input[64];char value[32];edCogParamValue(model,param,value);stdString_CharToWchar(input,value,64);
     for(;;){jkGuiElement e[]={{ELEMENT_TEXT,0,2,NULL,3,{20,40,600,45},1},{ELEMENT_TEXT,0,0,NULL,3,{20,110,600,40},1},{ELEMENT_TEXTBOX,0,0,NULL,31,{80,180,480,40},1},{ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,330,230,40},1},{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,330,230,40},1},{ELEMENT_END,0}};
@@ -119,6 +149,7 @@ static void capturePlacedCogs(jkGuiMenu *menu){static int frames,stage;if(++fram
 #endif
     if(stage==0)menu->lastClicked=12;else if(stage==1)menu->lastClicked=200;else if(stage==2||stage==3)menu->lastClicked=201;else menu->lastClicked=1;stage++;
 }
+#include "jkEditorCogExternal.h"
 static void placedCogsMenu(int resume){
     if(!resume){edFree(cogDraft);cogDraft=edCalloc(1,sizeof(*cogDraft));if(!cogDraft){say("Could not allocate the COG editor.");return;}cogDraft->count=model->cogCount;edCopy(cogDraft->cogs,model->cogs,sizeof(model->cogs));cogSelected=cogPage=cogParamPage=cogChosenParam=0;}
     if(!cogDraft)return;int previousModal=jkMain_bInModalGui;jkMain_bInModalGui=1;sithTime_Pause();stdControl_SetActivation(0);
@@ -135,12 +166,21 @@ static void placedCogsMenu(int resume){
         for(int i=0;i<8;i++)e[8+i]=jkGuiElement{ELEMENT_TEXTBUTTON,200+i,0,NULL,3,{305,87+i*33,315,32},c&&cogParamPage*8+i<c->count};
         e[16]=jkGuiElement{ELEMENT_TEXTBUTTON,10,0,NULL,3,{20,320,130,30},1};e[17]=jkGuiElement{ELEMENT_TEXTBUTTON,11,0,NULL,3,{160,320,130,30},1};e[18]=jkGuiElement{ELEMENT_TEXTBUTTON,12,0,NULL,3,{20,359,130,30},1};e[19]=jkGuiElement{ELEMENT_TEXTBUTTON,13,0,NULL,3,{160,359,130,30},c!=NULL};
         e[20]=jkGuiElement{ELEMENT_TEXTBUTTON,14,0,NULL,3,{20,398,270,28},c!=NULL};e[21]=jkGuiElement{ELEMENT_TEXTBUTTON,15,0,NULL,3,{305,359,150,30},c!=NULL};e[22]=jkGuiElement{ELEMENT_TEXTBUTTON,16,0,NULL,3,{470,359,150,30},c!=NULL};e[23]=jkGuiElement{ELEMENT_TEXTBUTTON,17,0,NULL,3,{305,398,150,28},c&&c->count>0};e[24]=jkGuiElement{ELEMENT_TEXTBUTTON,18,0,NULL,3,{470,398,150,28},c&&c->count>0};
-        e[25]=jkGuiElement{ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,435,230,35},1};e[26]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,435,230,35},1};jkGuiElement all[28];edCopy(all,e,sizeof(e));edZero(&all[27],0,sizeof(all[27]));all[27].type=ELEMENT_END;
+        e[25]=jkGuiElement{ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,435,230,35},1};e[26]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,435,230,35},1};jkGuiElement all[31]={};edCopy(all,e,sizeof(e));
+        // Keep room for resource actions above Apply/Cancel.
+        for(int i=3;i<8;i++)all[i].rect={20,83+(i-3)*38,270,36};
+        for(int i=8;i<16;i++)all[i].rect={305,83+(i-8)*29,315,28};
+        all[16].rect.y=all[17].rect.y=280;
+        all[18].rect.y=all[19].rect.y=315;all[20].rect.y=350;
+        all[21].rect.y=all[22].rect.y=320;all[23].rect.y=all[24].rect.y=355;
+        for(int i=0;i<3;i++)all[27+i]={ELEMENT_TEXTBUTTON,30+i,0,NULL,3,{20+i*205,397,195,28},1};all[30].type=ELEMENT_END;
         jkGuiMenu menu={all,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);all[0].wstr=info;all[1].wstr=u"Scripts";all[2].wstr=u"Click a parameter to assign it";for(int i=0;i<5;i++)all[3+i].wstr=rows[i];for(int i=0;i<8;i++)all[8+i].wstr=params[i];
-        const char16_t *labels[]={u"Previous",u"Next",u"Add COG",u"Delete",u"Duplicate",u"Prev params",u"Next params",u"Edit value",u"Clear value"};for(int i=0;i<9;i++)all[16+i].wstr=labels[i];all[25].wstr=u"Apply";
+        const char16_t *labels[]={u"Previous",u"Next",u"Add COG",u"Delete",u"Duplicate",u"Prev params",u"Next params",u"Edit value",u"Clear value"};for(int i=0;i<9;i++)all[16+i].wstr=labels[i];all[25].wstr=u"Apply";all[27].wstr=u"Import COG";all[28].wstr=u"Create COG";all[29].wstr=u"Edit COG";
+        menu.idkFunc=cogExternalMenuTick;
         if(getenv("GEOSITH_COG_CAPTURE")&&getenv("GEOSITH_STRESS"))menu.idkFunc=capturePlacedCogs;
         jkGuiRend_MenuSetReturnKeyShortcutElement(&menu,&all[25]);jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&all[26]);int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(all);
         if(choice<0)break;
+        if(choice>=30&&choice<=32){cogExternalMenu(choice);continue;}
         if(choice>=100&&choice<105){cogSelected=cogPage*5+choice-100;cogParamPage=cogChosenParam=0;}
         else if(choice==10&&cogPage>0)cogPage--;else if(choice==11&&(cogPage+1)*5<cogDraft->count)cogPage++;
         else if(choice==12||choice==14){if(cogDraft->count>=ED_COGS)jkGuiDialog_ErrorDialog(u"Placed COGs",u"The engine COG instance limit has been reached.");else if(choice==14&&c){cogDraft->cogs[cogDraft->count]=*c;cogSelected=cogDraft->count++;cogPage=cogSelected/5;}else{int id=chooseCogScript();if(id>=0){EdPlacedCog added;if(loadPlacedCog(cogSources[id].file,&added)){cogSelected=cogDraft->count;cogDraft->cogs[cogDraft->count++]=added;cogPage=cogSelected/5;cogParamPage=cogChosenParam=0;}else jkGuiDialog_ErrorDialog(u"Placed COGs",u"Could not read the COG symbol declarations.");}}}
@@ -150,6 +190,9 @@ static void placedCogsMenu(int resume){
             if(choice==18){edCopyModel(candidate,model);candidate->cogCount=cogDraft->count;edCogSetValue(candidate,param,param->type==ED_COG_VECTOR?"(0/0/0)":param->type==ED_COG_INT||param->type==ED_COG_FLEX?"0":"-1");}
             else if(choice==17)editCogValue(param);
             else if(param->type==ED_COG_THING||param->type==ED_COG_SURFACE||param->type==ED_COG_SECTOR||param->type==ED_COG_MATERIAL||param->type==ED_COG_TEMPLATE||param->type==ED_COG_VECTOR){cogPickParam=index;cogPickCancelled=0;picking=1;break;}
+            else if(param->type==ED_COG_SOUND){auto files=sectorSoundResources();int id=chooseCogSound(files,param->value);if(id>=0){
+                if(!sithSound_Load((char*)files[id].c_str(),0))jkGuiDialog_ErrorDialog(u"Sound",u"Could not load this sound resource.");
+                else edCogSetValue(candidate,param,files[id].c_str());}}
             else if(param->type==ED_COG_COG){std::vector<std::array<char16_t,128>> names(cogDraft->count);for(int i=0;i<cogDraft->count;i++){char name[96];snprintf(name,sizeof(name),"%d: %s",i,cogDraft->cogs[i].file);stdString_CharToWchar(names[i].data(),name,128);}int id=chooseList(u"Choose a Placed COG",(char16_t (*)[128])names.data(),cogDraft->count,0);if(id>=0)snprintf(param->value,32,"%d",id);}
             else editCogValue(param);
         }
@@ -158,9 +201,28 @@ static void placedCogsMenu(int resume){
     jkGui_SetModeGame();jkMain_SetVideoMode();sithTime_Resume();jkMain_bInModalGui=previousModal;stdControl_SetActivation(1);stdControl_Flush();fireDown=grabDown=middleDown=1;
     if(picking)cogPickPrompt();else{edFree(cogDraft);cogDraft=NULL;cogPickParam=-1;}
 }
+struct EditorCogSound {sithCog *cog;int synced;};
+static std::map<int,EditorCogSound> editorCogSounds;
+void jkEditor_CogSoundStarted(sithCog *cog,sithPlayingSound *sound,int synced) try {
+    if(!cog||!sound||!jkEditor_IsLevel())return;
+    for(auto i=editorCogSounds.begin();i!=editorCogSounds.end();)if(!sithSoundMixer_GetChannelHandle(i->first))i=editorCogSounds.erase(i);else ++i;
+    editorCogSounds[sound->refid]={cog,synced};
+} catch(const std::bad_alloc&) {}
 static int ownsCog(sithCog *cog){SithWorld *w=sithWorld_g_pCurrentWorld;if(!cog||!w)return 0;for(int i=0;i<ownedCogCount;i++)if(ownedCogSlots[i]<(int)w->numCogs&&cog==&w->aCogs[ownedCogSlots[i]])return 1;return 0;}
 static void suspendPlacedCogs(int geometry){SithWorld *w=sithWorld_g_pCurrentWorld;if(!w)return;
-    for(int i=0;i<ownedCogCount;i++)if(ownedCogSlots[i]<(int)w->numCogs)w->aCogs[ownedCogSlots[i]].flags|=SITH_COG_DISABLED;
+    for(auto i=editorCogSounds.begin();i!=editorCogSounds.end();){
+        sithPlayingSound *sound=sithSoundMixer_GetChannelHandle(i->first);
+        if(!sound||ownsCog(i->second.cog)){
+            if(sound){if(i->second.synced&&sithNet_isMulti)sithDSSThing_StopSound(sound,0,-1,255);sithSoundMixer_StopSound(sound);}
+            i=editorCogSounds.erase(i);
+        }else ++i;
+    }
+    for(int i=0;i<ownedCogCount;i++)if(ownedCogSlots[i]<(int)w->numCogs)w->aCogs[ownedCogSlots[i]].flags=(w->aCogs[ownedCogSlots[i]].flags|SITH_COG_DISABLED)&~(SITH_COG_TIMER_SET|SITH_COG_PULSE_SET);
+    // Extended timers address runtime slots; discard them before reusing a slot.
+    for(SithEvent **link=&sithEvent_g_pFirstQueuedEvent;*link;){SithEvent *event=*link;int owned=0;
+        if(event->taskNum==4)for(int i=0;i<ownedCogCount;i++)if(event->params.idx==ownedCogSlots[i])owned=1;
+        if(owned){*link=event->pNextEvent;sithEvent_FreeEvent(event);}else link=&event->pNextEvent;
+    }
     for(int i=0;i<sithCog_numSurfaceLinks;)if(geometry||ownsCog(sithCog_aSurfaceLinks[i].cog)){sithCog_aSurfaceLinks[i]=sithCog_aSurfaceLinks[--sithCog_numSurfaceLinks];}else i++;
     for(int i=0;i<sithCog_numSectorLinks;)if(geometry||ownsCog(sithCog_aSectorLinks[i].cog)){sithCog_aSectorLinks[i]=sithCog_aSectorLinks[--sithCog_numSectorLinks];}else i++;
     for(int i=0;i<sithCog_numThingLinks;)if(ownsCog(sithCog_aThingLinks[i].cog)){sithCog_aThingLinks[i]=sithCog_aThingLinks[--sithCog_numThingLinks];}else i++;
@@ -182,7 +244,8 @@ static SithCogScript *findEditorScript(const char *name){SithWorld *worlds[]={si
 }
 static int buildPlacedCogs(const EdModel *source){SithWorld *w=sithWorld_g_pCurrentWorld;suspendPlacedCogs(0);if(!w)return 0;
     for(int i=0;i<source->cogCount;i++){
-        if(!ensureCogSource(source->cogs[i].file))return 0;SithCogScript *script=findEditorScript(source->cogs[i].file);sithCog *loaded=NULL;
+        if(!ensureCogSource(source->cogs[i].file))return 0;SithCogScript *script=customResources.files.count(EdResources::path(std::string("cog/")+source->cogs[i].file))?cogCustomCompile(source->cogs[i].file):findEditorScript(source->cogs[i].file);sithCog *loaded=NULL;
+        if(!script&&customResources.files.count(EdResources::path(std::string("cog/")+source->cogs[i].file)))return 0;
         if(!script){SithWorld *previous=sithWorld_g_pLastLoadedWorld;sithWorld_g_pLastLoadedWorld=w;
             /* A placed instance is independent of class-script instances. */
             EdBuffer<unsigned int> flags;for(int j=0;j<w->numCogs;j++){flags[j]=w->aCogs[j].flags;w->aCogs[j].flags&=~SITH_COG_CLASS;}
@@ -191,6 +254,11 @@ static int buildPlacedCogs(const EdModel *source){SithWorld *w=sithWorld_g_pCurr
         int slot;if(i<ownedCogCount)slot=ownedCogSlots[i];else{if(loaded)slot=loaded->idx&0x7fff;else{if(w->numCogs>=w->sizeCogs)return 0;slot=w->numCogs++;}ownedCogSlots[ownedCogCount++]=slot;}
         sithCog *c=&w->aCogs[slot];if(loaded&&loaded!=c){clearCogInstance(loaded);w->numCogs--;}
         clearCogInstance(c);c->idx=slot;c->pScript=script;c->flags=script->flags&~SITH_COG_CLASS;c->pSymbolTable=sithCogParse_DuplicateSymbolTable(script->pSymbolTable);if(!c->pSymbolTable){c->flags|=SITH_COG_DISABLED;return 0;}
+        // This stock ambient script starts its loops in a delayed timer. Clients
+        // normally ignore non-local COG timers, leaving them dependent on the
+        // host's playback (which stops while the host edits). Each peer owns its
+        // ambient loops instead; NOSYNC prevents duplicate playback/remote stops.
+        if(!__strcmpi(source->cogs[i].file,"00_playambient.cog"))c->flags|=SITH_COG_LOCAL|SITHCOG_NOSYNC;
 #ifdef SITH_DEBUG_STRUCT_NAMES
         snprintf(c->aName,sizeof(c->aName),"%s",source->cogs[i].file);
 #endif
@@ -209,7 +277,64 @@ static int buildPlacedCogs(const EdModel *source){SithWorld *w=sithWorld_g_pCurr
     for(int i=0;i<source->cogCount;i++)sithCog_SendMessage(&w->aCogs[ownedCogSlots[i]],SITH_MESSAGE_STARTUP,0,0,0,0,0);return 1;
 }
 static int startPlacedCogs(const EdModel *source){int ok=buildPlacedCogs(source);if(!ok)suspendPlacedCogs(0);return ok;}
-static void closeCogEditor(void){edFree(cogDraft);cogDraft=NULL;cogPickParam=-1;cogPickCancelled=0;cogSourceCount=ownedCogCount=0;}
+static void closeCogEditor(void){cogExternalClose();editorCogSounds.clear();edFree(cogDraft);cogDraft=NULL;cogPickParam=-1;cogPickCancelled=0;cogSourceCount=ownedCogCount=0;}
+static int cogExternalSelfTest(void){
+    active=1;const char *name="zz_external_test.cog";
+    std::string first="symbols\nint value=7\nint result=0 local\nmessage startup\nend\ncode\nstartup:\nresult=value+10;\nreturn;\nend\n";
+    auto path=std::filesystem::absolute("editor-cogs-test.cog");{std::ofstream out(path,std::ios::binary);out<<first;}
+    if(!cogPublishCustom(name,cogReadExternal(path))){printf("COG EXTERNAL failed line %d\n",__LINE__);return 0;}
+    discoverCogs();int found=0;for(int i=0;i<cogSourceCount;i++)found|=!strcmp(cogSources[i].file,name);if(!found){printf("COG EXTERNAL failed line %d\n",__LINE__);return 0;}
+    EdPlacedCog placed;if(!loadPlacedCog(name,&placed)||placed.count!=1){printf("COG EXTERNAL failed line %d\n",__LINE__);return 0;}strcpy(placed.params[0].value,"9");
+    edCopyModel(candidate,model);candidate->cogs[0]=placed;candidate->cogCount=1;remember();if(!commit()){printf("COG EXTERNAL failed line %d\n",__LINE__);return 0;}
+    active=0;if(!startPlacedCogs(model)){printf("COG EXTERNAL failed line %d\n",__LINE__);return 0;}
+    auto result=[](){sithCog *c=&sithWorld_g_pCurrentWorld->aCogs[ownedCogSlots[0]];SithCogSymbol *symbol=(c->pSymbolTable->numUsedSymbols>1?&c->pSymbolTable->aSymbols[1]:NULL);return symbol?(symbol->val.type==SITHCOG_VALUE_FLOAT?(int)symbol->val.dataAsFloat[0]:(int)symbol->val.data[0]):-1;};
+    if(result()!=19){printf("COG EXTERNAL failed line %d\n",__LINE__);return 0;}
+    std::string second=first;second.replace(second.find("+10"),3,"+20");
+    cogExternalFiles[name]={path,first};{std::ofstream out(path,std::ios::binary);out<<second;}cogExternalTick();
+    if(cogReadExternal(path)!=second||result()!=29||strcmp(model->cogs[0].params[0].value,"9")){printf("COG EXTERNAL failed line %d result=%d value=%s active=%d cache=%zu\n",__LINE__,result(),model->cogs[0].params[0].value,active,cogCompiled.size());return 0;}
+    if(cogPublishCustom(name,"symbols\nmessage startup\nend\ncode\nstartup:\nnot_valid( ;\nend\n")){printf("COG EXTERNAL failed line %d\n",__LINE__);return 0;}
+    char *text=cogSourceText(name);int ok=text&&second==text;edFree(text);
+    EdResources bad=customResources;bad.files.erase("cog/zz_external_test.cog");ok=ok&&!cogCustomOnlyChanges(customResources,bad);
+    std::filesystem::remove(path);puts("COG EXTERNAL: import/discovery, compile, startup restart, watched save, preserved values, invalid-script rollback passed");return ok;
+}
+static int cogSoundSelfTest(void){
+    active=1;auto files=sectorSoundResources();if(files.empty())return 0;cogSoundTestName=files[0];
+    puts("COG_SOUND browser begin");fflush(stdout);BuilderMenuState menu=builderMenuBegin();int chosen=chooseCogSound(files,"");builderMenuEnd(menu);puts("COG_SOUND browser end");fflush(stdout);if(chosen<0||files[chosen]!=cogSoundTestName)return 0;
+    edCopyModel(candidate,model);candidate->cogCount=1;if(!loadPlacedCog("00_playambient.cog",&candidate->cogs[0]))return 0;
+    for(int i=0;i<candidate->cogs[0].count;i++){EdCogParam &p=candidate->cogs[0].params[i];const char *value=p.value;
+        if(p.type==ED_COG_THING)value=!strcmp(p.name,"soundPos0")?"0":"-1";
+        if(p.type==ED_COG_SOUND)value=files[chosen].c_str();if(!strcmp(p.name,"volume"))value="0.8";
+        if(!edCogSetValue(candidate,&p,value))return 0;
+    }
+    if(!commit())return 0;active=0;if(!startPlacedCogs(model))return 0;
+    sithCog *c=&sithWorld_g_pCurrentWorld->aCogs[ownedCogSlots[0]];
+    if(!(c->flags&SITH_COG_TIMER_SET))return 0;
+    // Exercise the client dispatch path with no host executing the timer.
+    int wasMulti=sithNet_isMulti,wasServer=sithNet_isServer,wasOutput=sithMessage_g_outputstream;
+    sithNet_isMulti=1;sithNet_isServer=0;sithMessage_g_outputstream=1;
+    sithCog_SendMessage(c,SITH_MESSAGE_TIMER,0,0,0,0,0);
+    int localOnly=!COG_SHOULD_SYNC(c)&&editorCogSounds.size()==1&&!editorCogSounds.begin()->second.synced;
+    sithNet_isMulti=wasMulti;sithNet_isServer=wasServer;sithMessage_g_outputstream=wasOutput;
+    if(!localOnly)return 0;
+    if(editorCogSounds.size()!=1){printf("COG_SOUND expected 1 channel, got %zu, mixer=%d\n",editorCogSounds.size(),sithSoundMixer_bOpened);return 0;}
+    int old=editorCogSounds.begin()->first;sithPlayingSound *playing=sithSoundMixer_GetChannelHandle(old);if(!playing||fabs(playing->vol_2-.8)>.001)return 0;
+    sithPlayingSound *unrelated=sithSoundMixer_PlaySound(playing->sound,.1,0,SITHSOUNDFLAG_LOOP);if(!unrelated)return 0;int unrelatedId=unrelated->refid;
+    SithEventParams params={};params.idx=c->idx;params.timerIdx=77;sithEvent_CreateEvent(4,&params,10000);
+    active=1;suspendPlacedCogs(0);if(sithSoundMixer_GetChannelHandle(old)||!sithSoundMixer_GetChannelHandle(unrelatedId)||!editorCogSounds.empty())return 0;
+    for(SithEvent *e=sithEvent_g_pFirstQueuedEvent;e;e=e->pNextEvent)if(e->taskNum==4&&e->params.idx==c->idx)return 0;
+    edCopyModel(candidate,model);for(int i=0;i<candidate->cogs[0].count;i++)if(!strcmp(candidate->cogs[0].params[i].name,"volume"))edCogSetValue(candidate,&candidate->cogs[0].params[i],"0.2");
+    if(!commit())return 0;active=0;if(!startPlacedCogs(model))return 0;c=&sithWorld_g_pCurrentWorld->aCogs[ownedCogSlots[0]];
+    if(!(c->flags&SITH_COG_TIMER_SET))return 0;
+    sithNet_isMulti=1;sithNet_isServer=1;sithMessage_g_outputstream=1;
+    sithCog_SendMessage(c,SITH_MESSAGE_TIMER,0,0,0,0,0);
+    localOnly=!COG_SHOULD_SYNC(c)&&editorCogSounds.size()==1&&!editorCogSounds.begin()->second.synced;
+    sithNet_isMulti=wasMulti;sithNet_isServer=wasServer;sithMessage_g_outputstream=wasOutput;
+    if(!localOnly)return 0;
+    if(editorCogSounds.size()!=1)return 0;int updated=editorCogSounds.begin()->first;playing=sithSoundMixer_GetChannelHandle(updated);if(!playing||fabs(playing->vol_2-.2)>.001)return 0;
+    edCopyModel(candidate,model);edCogDelete(candidate,0);if(!commit()||sithSoundMixer_GetChannelHandle(updated))return 0;
+    if(!sithSoundMixer_GetChannelHandle(unrelatedId))return 0;sithSoundMixer_StopSound(sithSoundMixer_GetChannelHandle(unrelatedId));
+    puts("COG_SOUND: client/host local ambient timers, no sound replication, search, changed volume, deletion, timer cleanup and unrelated sound preservation passed");return 1;
+}
 static int cogRuntimeCheck(void){if(model->cogCount!=1||ownedCogCount<1)return 0;sithCog *c=&sithWorld_g_pCurrentWorld->aCogs[ownedCogSlots[0]];if(c->flags&SITH_COG_DISABLED)return 0;
     int surface=0,thing=0;char value[32];edCogParamValue(model,&model->cogs[0].params[0],value);int id=atoi(value);
     for(int i=0;i<sithCog_numSurfaceLinks;i++)if(sithCog_aSurfaceLinks[i].cog==c&&sithCog_aSurfaceLinks[i].surface->index==id)surface=1;
@@ -250,4 +375,78 @@ static int stressCogs(SithThing *p){static int step;
         active=0;syncEditorObjects(model);if(!startPlacedCogs(model)||!cogRuntimeCheck())exit(2);active=1;suspendPlacedCogs(0);syncEditorObjects(model);
     }
     if(step++>=32){printf("GEOSITH_STRESS PASS: COG browser, surface/thing picking, cancel, undo and live script links, %d rendered frames\n",stressRenderFrames);fflush(stdout);exit(0);}return 1;
+}
+
+static int stressDestructible(SithThing *player){
+    static int frame;stressRunning=1;active=1;tool=1;if(frame++<5)return 1;
+    if(getenv("GEOSITH_LIFT_TEST")){
+        // Exercise the actual bound camera key in both directions while editing.
+        stdControlKeyInfo *cameraBinding=&sithControl_aInputFuncToKeyinfo[INPUT_FUNC_CAMERAMODE];if(!cameraBinding->numEntries)exit(2);
+        int cameraKey=cameraBinding->aEntries[0].dxKeyNum;sithCamera_g_curCycleCamNum=0;sithCamera_SetCurrentCamera(&sithCamera_g_aCameras[0]);
+        for(int cycle=0;cycle<2;cycle++){
+            stdControl_aKeyPressed[cameraKey]=0;stdControl_UpdateKeyState(cameraKey,1,stdPlatform_GetTimeMsec());jkControl_HandleCamera(player);
+            stdControl_UpdateKeyState(cameraKey,0,stdPlatform_GetTimeMsec());
+            if((sithCamera_g_pCurCamera==&sithCamera_g_aCameras[0])!=(cycle==1)){puts("GEOSITH_LIFT FAIL editor camera binding");exit(2);}
+        }
+        edCopyModel(candidate,model);if(!edExtrudeStep(candidate,0,1))exit(2);
+        for(int f=0;f<candidate->c[1].count;f++)for(int v=0;v<candidate->c[1].f[f].count;v++)if(candidate->c[1].f[f].v[v].p.z>1)candidate->c[1].f[f].v[v].p.z+=.5;
+        if(!commit())exit(2);clearHistory();
+        sectorPicks.clear();sectorPicks[1]=1;sectorAttributesDialog();
+        if(model->cogCount!=1||model->objectCount!=1||model->objects[0].attributes.frameCount!=2)exit(2);
+        if(!historyStep(0)||model->cogCount||!historyStep(1)||model->cogCount!=1)exit(2);
+        const EdObject &generatedLift=model->objects[0];
+        if((generatedLift.attributes.frames[1].position.z<generatedLift.position.z)!=(getenv("GEOSITH_LIFT_TOP_TEST")!=NULL))exit(2);
+        if(getenv("GEOSITH_OBJECT_MODEL_TEST")){
+            if(builderPickModel(edV(.8,0,1.3),edV(0,0,-1))!=0){puts("OBJECT_MODEL FAIL face picking");exit(2);}
+            int assets=model->assetCount;if(!builderEditObject(0)||!builderEditingName[0])exit(2);
+            builderTestDiscard=1;builderFinish();builderTestDiscard=0;if(model->assetCount!=assets)exit(2);
+            if(!builderEditObject(0))exit(2);edCopyModel(candidate,model);
+            for(int i=0;i<candidate->meshCount;i++)if(candidate->meshes[i].asset==builderAsset)candidate->meshes[i].geometry.f[0].v[0].u+=17;
+            if(!commit())exit(2);builderFinish();if(model->assetCount!=assets||builderAsset!=-1)exit(2);
+            remember();edCopyModel(candidate,model);for(int i=0;i<2;i++){EdObject object={};strcpy(object.templateName,"crate4_1");object.position=edV(i?.4:-.4,0,.3);candidate->objects[candidate->objectCount++]=object;}if(!commit())exit(2);
+            rdModel3 *original=sithTemplate_GetTemplate("crate4_1")->renderData.model3;char filename[64];snprintf(filename,64,"%s",original->filename);
+            if(!builderEditObject(1))exit(2);edCopyModel(candidate,model);for(int i=0;i<candidate->meshCount;i++)if(candidate->meshes[i].asset==builderAsset)candidate->meshes[i].geometry.f[0].v[0].u+=23;if(!commit())exit(2);
+            builderFinish();rdModel3 *updated=sithModel_Find(filename);if(updated==original)exit(2);
+            for(int o=1;o<3;o++)if(sithWorld_g_pCurrentWorld->aThings[objectThings[o]].renderData.model3!=updated)exit(2);
+            if(!historyStep(0)||sithTemplate_GetTemplate("crate4_1")->renderData.model3!=original||!historyStep(1)||sithTemplate_GetTemplate("crate4_1")->renderData.model3==original)exit(2);
+            if(!writeEditorGob(model,"Episode/sithed_object_model_test.gob","Object model test",0))exit(2);
+            puts("GEOSITH_OBJECT_MODEL PASS: mesh-face picking, custom edit/discard, stock import, shared instance refresh, undo/redo and packaging");fflush(stdout);sithSound_Shutdown();exit(0);
+        }
+        if(!writeEditorGob(model,"Episode/sithed_lift_test.gob","Lift test",0))exit(2);
+        leaveEditor(player);SithThing *lift=&sithWorld_g_pCurrentWorld->aThings[objectThings[0]];
+        if(lift->moveType!=SITH_MT_PATH||lift->trackParams.loadedFrames!=2||lift->trackParams.flags)exit(2);
+        sithCog_ThingSendMessage(lift,player,SITH_MESSAGE_ENTERED);
+        if(lift->goalframe!=1||!lift->trackParams.flags||fabs(lift->trackParams.moveVel-.8)>.001||!lift->pSoundClass){puts("GEOSITH_LIFT FAIL step-on trigger/speed/sound");fflush(stdout);exit(2);}
+        puts("GEOSITH_LIFT PASS: menu, floor clearance, frames, undo/redo, packaging and stock COG step-on trigger");fflush(stdout);sithSound_Shutdown();exit(0);
+    }
+    if(const char *sector=getenv("GEOSITH_DESTRUCTIBLE_DIAG")){
+        EdBuffer<unsigned char> picked;picked[atoi(sector)]=1;edCopyModel(candidate,model);
+        printf("DESTRUCTIBLE diagnostic sectors=%d templates=%d meshes=%d valid=%d target=%d spline=%d\n",model->count,model->templateCount,model->meshCount,edValidate(model),atoi(sector),model->c[atoi(sector)].splineId);fflush(stdout);
+        if(const char *path=getenv("GEOSITH_DESTRUCTIBLE_FIXTURE")){
+            EdModel fixture;edDefault(&fixture);fixture.c[0]=model->c[atoi(sector)];EdVec center={};int n=0;
+            for(int f=0;f<fixture.c[0].count;f++){EdFace &face=fixture.c[0].f[f];face.neighbor=face.mirror=-1;face.hasAttributes=0;face.material=0;face.decalId=0;for(int v=0;v<face.count;v++){center=edAdd(center,face.v[v].p);n++;}}
+            fixture.spawn=fixture.spawns[0].position=edScale(center,1.0/n);
+            unsigned size=0;unsigned char *data=edWireEncode(&fixture,&size);FILE *file=fopen(path,"wb");if(file&&data){fwrite(data,1,size,file);fclose(file);}edFree(data);
+        }
+        int ok;
+        if(getenv("GEOSITH_LIFT_DIAG")){
+            EdPlacedCog cog={};char *source=cogSourceText("12_trooperelev.cog");ok=source&&edCogParseScript(&cog,"12_trooperelev.cog",source);edFree(source);
+            if(ok)ok=edGenerateLift(candidate,atoi(sector),"diag_lift",cog);
+            if(ok)printf("LIFT diagnostic bottom=%g top=%g\n",candidate->objects[candidate->objectCount-1].position.z,candidate->objects[candidate->objectCount-1].attributes.frames[1].position.z);
+        }else ok=edGenerateDestructible(candidate,picked,"diag_wall");printf("GENERATOR diagnostic result=%d\n",ok);fflush(stdout);sithSound_Shutdown();exit(ok?0:2);
+    }
+    sectorPicks.clear();sectorPicks[0]=1;sectorAttributesDialog();
+    if(model->cogCount!=1){puts("DESTRUCTIBLE FAIL menu");exit(2);}
+    if(!historyStep(0)||model->cogCount||!historyStep(1)||model->cogCount!=1){puts("DESTRUCTIBLE FAIL undo");exit(2);}
+    if(!writeEditorGob(model,"Episode/sithed_destructible_test.gob","Destructible test",0)){puts("DESTRUCTIBLE FAIL save");exit(2);}
+    leaveEditor(player);SithWorld *world=sithWorld_g_pCurrentWorld;
+    int wallId=objectThings[0];if(wallId<0){puts("DESTRUCTIBLE FAIL wall");exit(2);}SithThing *wall=&world->aThings[wallId];
+    sithThing_DamageThing(wall,player,10,SITH_DAMAGE_ENERGY);
+    if(wall->flags&(SITH_TF_DESTROYED|SITH_TF_DISABLED)){puts("DESTRUCTIBLE FAIL energy filter");exit(2);}
+    int damage=getenv("GEOSITH_DESTRUCTIBLE_EXPLOSION_TEST")?SITH_DAMAGE_FIRE:SITH_DAMAGE_SABER;
+    sithThing_DamageThing(wall,player,10,damage);
+    int debris=0,blast=0;for(int i=0;i<world->numThingsLoaded;i++){debris+=world->aThings[i].type==SITH_THING_DEBRIS;blast+=world->aThings[i].type==SITH_THING_EXPLOSION;}
+    printf("DESTRUCTIBLE damage=%d flags=%x debris=%d explosion=%d\n",damage,wall->flags,debris,blast);
+    if(!(wall->flags&SITH_TF_DESTROYED)||debris!=12||blast!=1){puts("DESTRUCTIBLE FAIL COG");fflush(stdout);exit(2);}
+    puts("GEOSITH_DESTRUCTIBLE PASS: generation, undo/redo, packaging, damage filter, fracture debris and explosion");fflush(stdout);sithSound_Shutdown();exit(0);
 }

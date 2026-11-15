@@ -1,4 +1,5 @@
 #include "sithDSSThing.h"
+#include <math.h>
 #include "Main/jkEditor.h"
 
 #include "Cog/sithCog.h"
@@ -1505,6 +1506,11 @@ int sithDSSThing_ProcessCreateThing(SithMessage *pMsg)
 {
     rdMatrix34 lookOrient;
 
+    /* Marker spawns contain 10 bytes; explicit-position spawns contain 38.
+     * Validate before reading or creating anything in the live world. */
+    if (pMsg->netMsg.msg_size != 10 && pMsg->netMsg.msg_size != 38)
+        return 0;
+
     NETMSG_IN_START(pMsg);
 
     SithThing* pCreated = NULL;
@@ -1512,13 +1518,19 @@ int sithDSSThing_ProcessCreateThing(SithMessage *pMsg)
     if ( pThing )
     {
         int pThing2Id = NETMSG_POPS32();
+        if (pMsg->netMsg.msg_size != (pThing2Id < 0 ? 38 : 10))
+            return 0;
         if ( pThing2Id < 0 )
         {
-            SithSector* pSector = sithSector_GetPtrFromIdx(NETMSG_POPS16());
+            /* Match the 32-bit sector written by sithDSSThing_CreateThing. */
+            SithSector* pSector = sithSector_GetPtrFromIdx(NETMSG_POPS32());
             if ( !pSector )
                 return 0;
             rdVector3 pos = NETMSG_POPVEC3();
             rdVector3 rot = NETMSG_POPVEC3();
+            if (!isfinite(pos.x) || !isfinite(pos.y) || !isfinite(pos.z)
+                || !isfinite(rot.x) || !isfinite(rot.y) || !isfinite(rot.z))
+                return 0;
             rdMatrix_BuildRotate34(&lookOrient, &rot);
             pCreated = sithThing_CreateThingAtPos(pThing, &pos, &lookOrient, pSector, 0);
         }

@@ -21,6 +21,7 @@ if(NOT MSVC)
 endif()
 add_test(NAME geometry COMMAND editor_tests)
 add_test(NAME tunnel_group_spline COMMAND editor_tests --group-fixture "${CMAKE_CURRENT_SOURCE_DIR}/tunnel_group_fixture.bin")
+add_test(NAME lava_tunnel_spline COMMAND editor_tests --spline-isolated "${CMAKE_CURRENT_SOURCE_DIR}/lava_tunnel_spline_fixture.bin")
 
 add_executable(network_unit_tests network_test.cpp)
 target_compile_features(network_unit_tests PRIVATE cxx_std_17)

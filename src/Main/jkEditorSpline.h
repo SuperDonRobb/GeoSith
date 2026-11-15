@@ -1,3 +1,4 @@
+static unsigned int sectorFlagsDialog(std::vector<EdCell>& draft);
 /* Editable spline controls use the normal document transaction path. */
 static int splineSelected,splinePoint=-1,splineDrawing,splineDragging,splineHandle,splineStartDown,splineEnterDown,splineDragRight;
 static EdSpline splineDraft;
@@ -53,6 +54,14 @@ static void splineShapeDraw(jkGuiElement *e,jkGuiMenu *menu,tVBuffer *buffer,BOO
 }
 static void splineMenuTest(jkGuiMenu *menu){
     static int frame,stage;if(++frame%3)return;
+    if(getenv("GEOSITH_SPLINE_WALKSTRUCT_TEST")&&menu->paElements[1].type!=ELEMENT_TEXTBUTTON){
+        menu->paElements[16].boxChecked=1;
+#ifdef SDL2_RENDER
+        if(const char *path=getenv("GEOSITH_SPLINE_MENU_CAPTURE"))std3D_ScreenshotWindow(path);
+#endif
+        menu->lastClicked=1;return;
+    }
+    if(getenv("GEOSITH_SPLINE_FLAGS_TEST")&&menu->paElements[1].type!=ELEMENT_TEXTBUTTON){stdString_SafeWStrCopy((char16_t*)menu->paElements[15].wstr,u"0.1 0.2 0.3",128);menu->lastClicked=stage++?1:23;return;}
     if(getenv("GEOSITH_SPLINE_CONVERT_CAPTURE")){
 #ifdef SDL2_RENDER
         std3D_ScreenshotWindow(getenv("GEOSITH_SPLINE_CONVERT_CAPTURE"));
@@ -70,7 +79,7 @@ static int splineShapeMenu(int sides){
     for(;;){jkGuiElement e[15]={};e[0]={ELEMENT_TEXT,0,2,NULL,3,{20,15,600,40},1};
         for(int i=0;i<10;i++){int n=3+page*10+i;e[i+1]={ELEMENT_TEXTBUTTON,100+i,0,NULL,3,{20+(i%5)*120,90+(i/5)*115,112,100},n<=32+model->groupCount};e[i+1].drawFuncOverride=splineShapeDraw;e[i+1].otherDataPtr=n;}
         e[11]={ELEMENT_TEXTBUTTON,2,2,NULL,3,{20,400,180,40},1};e[12]={ELEMENT_TEXTBUTTON,3,2,NULL,3,{440,400,180,40},1};e[13]={ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{230,400,180,40},1};e[14].type=ELEMENT_END;
-        jkGuiMenu menu={e,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);e[0].wstr=u"Spline Cross-section";e[11].wstr=u"Previous";e[12].wstr=u"Next";jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&e[13]);if((getenv("GEOSITH_SPLINE_MENU_CAPTURE")||getenv("GEOSITH_SPLINE_CONVERT_CAPTURE"))&&getenv("GEOSITH_SPLINE_TEST"))menu.idkFunc=splineMenuTest;if(getenv("GEOSITH_ARRAY_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=arrayTestMenu;int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(e);
+        jkGuiMenu menu={e,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);e[0].wstr=u"Spline Cross-section";e[11].wstr=u"Previous";e[12].wstr=u"Next";jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&e[13]);if((getenv("GEOSITH_SPLINE_WALKSTRUCT_TEST")||getenv("GEOSITH_SPLINE_FLAGS_TEST")||getenv("GEOSITH_SPLINE_MENU_CAPTURE")||getenv("GEOSITH_SPLINE_CONVERT_CAPTURE"))&&getenv("GEOSITH_SPLINE_TEST"))menu.idkFunc=splineMenuTest;if(getenv("GEOSITH_ARRAY_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=arrayTestMenu;int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(e);
         if(choice>=100&&choice<110){int item=page*10+choice-100;return item<30?item+3:-(item-29);}if(choice==2)page=(std::max)(0,page-1);else if(choice==3)page=(std::min)((29+model->groupCount)/10,page+1);else return sides;
     }
 }
@@ -84,21 +93,30 @@ static void splineAttributes(void){
     int modal=jkMain_bInModalGui;jkMain_bInModalGui=1;sithTime_Pause();stdControl_SetActivation(0);
     if(jkGame_isDDraw){Windows_ShutdownGdi();Video_SwitchToGDI();jkPlayer_Close();jkGame_isDDraw=0;}
     stdBitmap_EnsureData(jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);jkGui_SetModeMenu(jkGui_stdBitmaps[JKGUI_BM_BK_ESC]->palette);
-    for(;;){char16_t values[3][128],shape[128],texture[160];char text[128];double numbers[3];
+    for(;;){char16_t values[3][128],shape[128],texture[160],tintValue[128];char text[128];double numbers[3];
         if(point>=0){numbers[0]=draft.points[point].position.x;numbers[1]=draft.points[point].position.y;numbers[2]=draft.points[point].position.z;}else{numbers[0]=draft.segments;numbers[1]=draft.width;numbers[2]=draft.height;}
-        jkGuiElement e[14]={};e[0]={ELEMENT_TEXT,0,2,NULL,3,{20,18,600,40},1};
-        for(int i=0;i<3;i++){snprintf(text,sizeof(text),"%.9g",numbers[i]);stdString_CharToWchar(values[i],text,128);e[i+1]={ELEMENT_TEXT,0,0,NULL,3,{30,100+i*60,180,28},1};e[i+4]={ELEMENT_TEXTBOX,10+i,0,NULL,127,{220,98+i*60,380,32},1};}
-        e[7]={point<0?ELEMENT_TEXTBUTTON:ELEMENT_TEXT,20,0,NULL,3,{80,290,480,36},1};e[8]={ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,425,230,36},1};e[9]={ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,425,230,36},1};e[10]={ELEMENT_TEXT,0,0,NULL,3,{24,382,592,36},1};e[11]={ELEMENT_TEXTBUTTON,21,0,NULL,3,{40,336,560,36},point<0};e[12]={ELEMENT_TEXTBUTTON,22,0,NULL,3,{40,378,560,32},point<0};e[13].type=ELEMENT_END;
-        jkGuiMenu menu={e,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);e[0].wstr=point>=0?u"Spline Point Attributes":u"Spline Shape and Geometry";
+        jkGuiElement e[18]={};e[0]={ELEMENT_TEXT,0,2,NULL,3,{20,14,600,36},1};
+        for(int i=0;i<3;i++){snprintf(text,sizeof(text),"%.9g",numbers[i]);stdString_CharToWchar(values[i],text,128);e[i+1]={ELEMENT_TEXT,0,0,NULL,3,{30,85+i*50,180,28},1};e[i+4]={ELEMENT_TEXTBOX,10+i,0,NULL,127,{220,83+i*50,380,32},1};}
+        e[7]={point<0?ELEMENT_TEXTBUTTON:ELEMENT_TEXT,20,0,NULL,3,{80,290,480,36},1};e[8]={ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,425,230,36},1};e[9]={ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,425,230,36},1};e[10]={ELEMENT_TEXT,0,0,NULL,3,{24,382,592,36},1};e[11]={ELEMENT_TEXTBUTTON,21,0,NULL,3,{40,336,560,36},point<0};e[12]={ELEMENT_TEXTBUTTON,22,0,NULL,3,{330,378,270,32},point<0};e[13]={ELEMENT_TEXTBUTTON,23,0,NULL,3,{40,378,270,32},point<0};e[14]={ELEMENT_TEXT,0,0,NULL,3,{30,238,180,28},point<0};e[15]={ELEMENT_TEXTBOX,13,0,NULL,127,{220,236,380,32},point<0};e[16]={ELEMENT_CHECKBOX,0,0,NULL,0,{40,57,560,24},point<0};e[16].boxChecked=draft.makeWalkstruct;e[17].type=ELEMENT_END;
+        jkGuiMenu menu={e,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);e[0].wstr=point>=0?u"Spline Point Attributes":u"Spline Shape and Geometry";e[16].wstr=u"Make walkstruct";
         const char16_t *labels[]={u"Sectors (1-256)",u"Width",u"Height",u"X",u"Y",u"Z"};for(int i=0;i<3;i++){e[i+1].wstr=labels[i+(point>=0?3:0)];e[i+4].wstr=values[i];}
-        shapeLabel(draft.sides,text,sizeof(text));if(draft.groupId)snprintf(text,sizeof(text),"Group: %s",model->groups[draft.groupId-1].name);else if(draft.sides==32)strcpy(text,"Circle (32)");stdString_CharToWchar(shape,text,128);e[7].wstr=point>=0?u"Position is the center of the corridor cross-section.":shape;e[8].wstr=u"Apply";e[12].wstr=u"Convert to Sectors";e[10].bIsVisible=point>=0;e[10].wstr=point>=0?u"Move the point without changing its tangent handle.":u"Click the shape to choose a cross-section.\nTight curves may need narrower corridors or more sectors.";
+        shapeLabel(draft.sides,text,sizeof(text));if(draft.groupId)snprintf(text,sizeof(text),"Group: %s",model->groups[draft.groupId-1].name);else if(draft.sides==32)strcpy(text,"Circle (32)");stdString_CharToWchar(shape,text,128);e[7].wstr=point>=0?u"Position is the center of the corridor cross-section.":shape;e[8].wstr=u"Apply";e[12].wstr=u"Convert to Sectors";e[13].wstr=u"Sector Flags...";e[10].bIsVisible=point>=0;e[10].wstr=point>=0?u"Move the point without changing its tangent handle.":u"Click the shape to choose a cross-section.\nTight curves may need narrower corridors or more sectors.";
+        if(draft.hasSectorTint)snprintf(text,sizeof(text),"%.9g %.9g %.9g",draft.sectorTint.x,draft.sectorTint.y,draft.sectorTint.z);else snprintf(text,sizeof(text),"%s",draft.groupId?"":"0 0 0");stdString_CharToWchar(tintValue,text,128);e[14].wstr=u"Sector tint (R G B)";e[15].wstr=tintValue;
         char textureText[160];snprintf(textureText,sizeof(textureText),"Texture: %s",draft.material>=0&&draft.material<paletteCount?paletteNames[draft.material]:"Choose...");stdString_CharToWchar(texture,textureText,160);e[11].wstr=texture;if(draft.groupId){e[11].type=ELEMENT_TEXT;e[11].wstr=u"Uses group textures (forward axis set in Array menu)";if(point<0)e[1].wstr=u"Group copies (1-256)";}
-        jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&e[9]);jkGuiRend_MenuSetReturnKeyShortcutElement(&menu,&e[8]);if((getenv("GEOSITH_SPLINE_MENU_CAPTURE")||getenv("GEOSITH_SPLINE_CONVERT_CAPTURE"))&&getenv("GEOSITH_SPLINE_TEST"))menu.idkFunc=splineMenuTest;if(getenv("GEOSITH_ARRAY_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=arrayTestMenu;int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(e);if(choice<0)break;
+        jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&e[9]);jkGuiRend_MenuSetReturnKeyShortcutElement(&menu,&e[8]);if((getenv("GEOSITH_SPLINE_WALKSTRUCT_TEST")||getenv("GEOSITH_SPLINE_FLAGS_TEST")||getenv("GEOSITH_SPLINE_MENU_CAPTURE")||getenv("GEOSITH_SPLINE_CONVERT_CAPTURE"))&&getenv("GEOSITH_SPLINE_TEST"))menu.idkFunc=splineMenuTest;if(getenv("GEOSITH_ARRAY_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=arrayTestMenu;int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(e);if(choice<0)break;
+        if(point<0)draft.makeWalkstruct=e[16].boxChecked!=0;
         if(choice==22&&point<0){if(edModelsEqual(&original,model)&&splineConvertSelected())break;say("Spline conversion cancelled: level changed.");break;}
         int valid=1;for(int i=0;i<3;i++){char extra;stdString_WcharToChar(text,values[i],128);if(sscanf(text," %lf %c",&numbers[i],&extra)!=1||!isfinite(numbers[i]))valid=0;}
         if(point<0&&(numbers[0]<1||numbers[0]>ED_SPLINE_SECTORS||floor(numbers[0])!=numbers[0]||numbers[1]<ED_GRID||numbers[2]<ED_GRID||numbers[1]>1000||numbers[2]>1000))valid=0;
+        EdVec tint={};int hasTint=0;if(point<0){stdString_WcharToChar(text,tintValue,128);char extra;hasTint=strspn(text," \t\r\n")!=strlen(text);if(hasTint&&(sscanf(text," %lf %lf %lf %c",&tint.x,&tint.y,&tint.z,&extra)!=3||!isfinite(tint.x)||!isfinite(tint.y)||!isfinite(tint.z)||tint.x<0||tint.x>1||tint.y<0||tint.y>1||tint.z<0||tint.z>1)){jkGuiDialog_ErrorDialog(u"Spline Tint",u"Enter red, green and blue values from 0 to 1.\n0 0 0 clears tint. Leave blank to inherit group tint.");continue;}}
         if(!valid){jkGuiDialog_ErrorDialog(u"Spline",u"Enter valid numbers. Sector count must be 1-256; width and height must be 0.0625-1000.");continue;}
-        if(point>=0)draft.points[point].position=edV(numbers[0],numbers[1],numbers[2]);else{draft.segments=(int)numbers[0];draft.width=numbers[1];draft.height=numbers[2];}
+        if(point>=0)draft.points[point].position=edV(numbers[0],numbers[1],numbers[2]);else{draft.segments=(int)numbers[0];draft.width=numbers[1];draft.height=numbers[2];draft.hasSectorTint=hasTint;draft.sectorTint=tint;}
+        if(choice==23&&point<0){
+            std::vector<EdCell> cells;
+            for(int c=0;c<model->count;c++)if(model->c[c].splineId==draft.id){EdCell cell={};cell.flags=(model->c[c].flags&~draft.sectorFlagsMask)|(draft.sectorFlags&draft.sectorFlagsMask);cells.push_back(cell);}
+            if(cells.empty()){EdCell cell={};cell.flags=draft.sectorFlags;cells.push_back(cell);}
+            unsigned int mask=sectorFlagsDialog(cells);draft.sectorFlags=(draft.sectorFlags&~mask)|(cells[0].flags&mask);draft.sectorFlagsMask|=mask;continue;
+        }
         if(choice==21&&point<0){int oldMaterial=currentMaterial,oldObjects=browserObjects;currentMaterial=draft.material;browserObjects=0;materialMenu(1);draft.material=currentMaterial;currentMaterial=oldMaterial;browserObjects=oldObjects;continue;}
         if(choice==20&&point<0){int choice=splineShapeMenu(draft.groupId?-draft.groupId:draft.sides);if(choice<0){draft.groupId=-choice;EdVec lo,hi;const EdSectorGroup &g=model->groups[draft.groupId-1];edGroupBounds(&g,&lo,&hi);EdVec size=edSub(hi,lo),forward=edGroupAxis(g.direction),up=g.direction/2==2?edV(0,1,0):edV(0,0,1);draft.width=fabs(edDot(size,edCross(forward,up)));draft.height=fabs(edDot(size,up));}else{draft.groupId=0;draft.sides=choice;}continue;}
         if(!edModelsEqual(&original,model)){say("Level changed while the spline menu was open. Reopen the menu.");break;}

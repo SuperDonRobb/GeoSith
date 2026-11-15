@@ -15,6 +15,10 @@ int edSplineValidate(const EdModel *m){
     if(m->splineCount<0||m->splineCount>ED_SPLINES)return 0;
     for(int i=0;i<m->splineCount;i++){const EdSpline &s=m->splines[i];
         if(s.groupId<0||s.groupId>m->groupCount||s.mirrorAxes<0||s.mirrorAxes>7||(s.closed!=0&&s.closed!=1)||(s.closed&&s.count<3)||s.id<=0||s.count<1||s.count>ED_SPLINE_POINTS||s.sides<3||s.sides>32||s.segments<1||s.segments>ED_SPLINE_SECTORS||s.material<0||!isfinite(s.width)||!isfinite(s.height)||s.width<ED_GRID||s.height<ED_GRID||s.width>1000||s.height>1000)return 0;
+        if(s.makeWalkstruct<0||s.makeWalkstruct>1||!memchr(s.walkstructName,0,32)||(s.walkstructName[0]&&!templateToken(s.walkstructName,32)))return 0;
+        if(s.hasSectorTint<0||s.hasSectorTint>1)return 0;
+        for(double value:{s.sectorTint.x,s.sectorTint.y,s.sectorTint.z})if(!isfinite(value)||value<0||value>1)return 0;
+        if(s.sectorFlagsMask&0x1000u)return 0; // Collision bounds are engine-managed.
         if(s.textureHeight<0||s.textureHeight>16384||s.invalid<0||s.invalid>1||s.cutBefore.size()!=s.cutAfter.size())return 0;
         for(const EdBuffer<EdCell> *cells:{&s.cutBefore,&s.cutAfter,&s.preview})for(size_t c=0;c<cells->size();c++)for(int f=0;f<(*cells)[c].count;f++)for(int v=0;v<(*cells)[c].f[f].count;v++){EdVec p=(*cells)[c].f[f].v[v].p;if(!isfinite(p.x)||!isfinite(p.y)||!isfinite(p.z)||fabs(p.x)>1000000||fabs(p.y)>1000000||fabs(p.z)>1000000)return 0;}
         for(int j=0;j<i;j++)if(m->splines[j].id==s.id)return 0;
@@ -29,6 +33,10 @@ void edSplineReconcile(EdModel *m){
 int edSplineConvert(EdModel *m,int id){
     for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id){
         if(m->splines[i].invalid)return 0;
+        if(m->splines[i].makeWalkstruct){EdSpline settings=m->splines[i];settings.makeWalkstruct=0;EdModel converted;
+            if(!edSplineUpdate(&converted,m,&settings,settings.textureHeight?settings.textureHeight:64)||!edSplineConvert(&converted,id))return 0;
+            *m=std::move(converted);return 1;}
+
         for(int c=0;c<m->count;c++)if(m->c[c].splineId==id)m->c[c].splineId=0;
         for(int j=i+1;j<m->splineCount;j++)m->splines[j-1]=std::move(m->splines[j]);m->splineCount--;return 1;
     }return 0;
@@ -46,12 +54,138 @@ static bool splineSameCell(EdCell a,EdCell b){
 static void splineRestoreCuts(EdModel *m,const EdSpline &s){
     for(size_t p=0;p<s.cutAfter.size();p++)for(int c=0;c<m->count;c++)if(splineSameCell(m->c[c],s.cutAfter[p])){m->c[c]=s.cutBefore[p];break;}
 }
+// A spline owns its generated asset/template/instance until converted or removed.
+static void splineRemoveWalkstructPart(EdModel *m,const char *name){
+    if(!*name)return;
+    for(int i=m->objectCount-1;i>=0;i--)if(!strcmp(m->objects[i].templateName,name)){
+        edCogThingChanged(m,i,0);for(int j=i+1;j<m->objectCount;j++)m->objects[j-1]=std::move(m->objects[j]);m->objectCount--;}
+    int t=edTemplateIndex(m,name);if(t>=0){for(int j=t+1;j<m->templateCount;j++)m->templates[j-1]=std::move(m->templates[j]);m->templateCount--;}
+    for(int a=0;a<m->assetCount;a++)if(!strcmp(m->assets[a].name,name)){
+        for(int i=0;i<m->meshCount;)if(m->meshes[i].asset==a){for(int j=i+1;j<m->meshCount;j++)m->meshes[j-1]=std::move(m->meshes[j]);m->meshCount--;}else{if(m->meshes[i].asset>a)m->meshes[i].asset--;i++;}
+        for(int j=a+1;j<m->assetCount;j++)m->assets[j-1]=std::move(m->assets[j]);m->assetCount--;break;}
+}
+static bool splineOwnsWalkstruct(const char *root,const char *name){
+    if(!*root)return false;if(!strcmp(root,name))return true;
+    char prefix[32];snprintf(prefix,sizeof(prefix),"%.20s_s",root);size_t n=strlen(prefix);
+    if(strncmp(prefix,name,n)||!name[n])return false;
+    for(const char *p=name+n;*p;p++)if(*p<'0'||*p>'9')return false;return true;
+}
+static void splineRemoveWalkstruct(EdModel *m,const char *name){
+    std::vector<std::string> names;for(int a=0;a<m->assetCount;a++)if(splineOwnsWalkstruct(name,m->assets[a].name))names.push_back(m->assets[a].name);
+    for(const auto &part:names)splineRemoveWalkstructPart(m,part.c_str());
+}
+// JK searches a thing's owning sector (and nearby adjoins), not every sector
+// reached by its model. Clip the exterior into sector-local things, retaining
+// one spline control and exactly the same textured outer surface.
+static int splinePartitionWalkstruct(EdModel *m,int index,bool rootOnly=false){
+    const std::string root=m->splines[index].walkstructName;std::vector<EdFace> faces;
+    std::vector<std::string> oldNames;EdVec fallback={};int lightBaker=0;
+    for(int a=0;a<m->assetCount;a++)if(splineOwnsWalkstruct(root.c_str(),m->assets[a].name)){
+        oldNames.push_back(m->assets[a].name);if(rootOnly&&strcmp(root.c_str(),m->assets[a].name))continue;fallback=m->assets[a].origin;lightBaker|=m->assets[a].lightBaker;
+        for(int mesh=0;mesh<m->meshCount;mesh++)if(m->meshes[mesh].asset==a)for(int f=0;f<m->meshes[mesh].geometry.count;f++)faces.push_back(m->meshes[mesh].geometry.f[f]);
+    }
+    if(faces.empty())return 0;
+    std::vector<EdResolveBounds> bounds;for(int c=0;c<m->count;c++)bounds.push_back(resolveBounds(m->c[c]));
+    std::vector<std::vector<EdFace>> pieces(m->count+1);
+    for(const EdFace &face:faces){
+        EdCell box={};box.count=1;box.f[0]=face;EdResolveBounds faceBounds=resolveBounds(box);
+        std::vector<EdFace> remaining{face};
+        for(int c=0;c<m->count&&!remaining.empty();c++){
+            if(resolveBoundsSeparate(faceBounds,bounds[c]))continue;
+            std::vector<EdFace> outside;
+            for(const EdFace &part:remaining){EdFace inside=part;
+                for(int f=0;f<m->c[c].count&&inside.count;f++){
+                    const EdFace &plane=m->c[c].f[f];EdVec n=edNormal(&plane);double d=edDot(n,plane.v[0].p),low=1e30,high=-1e30;
+                    for(int v=0;v<inside.count;v++){double distance=edDot(n,inside.v[v].p)-d;low=fmin(low,distance);high=fmax(high,distance);}
+                    if(low>=-ED_EPS)continue;
+                    if(high<=ED_EPS){outside.push_back(inside);inside.count=0;break;}
+                    EdFace a,b;if(!clip(&inside,n,d,&a)||!clip(&inside,edScale(n,-1),-d,&b))return 0;
+                    if(b.count)outside.push_back(std::move(b));inside=std::move(a);
+                }
+                if(inside.count)pieces[c].push_back(std::move(inside));
+            }remaining=std::move(outside);
+        }
+        // Keep any geometry beyond the current architecture, too. It may be
+        // enclosed later when the level is extended.
+        for(auto &part:remaining)pieces[m->count].push_back(std::move(part));
+    }
+    std::vector<std::string> used;int number=0;
+    for(int c=0;c<=(int)m->count;c++)if(!pieces[c].empty()){
+        char name[32];if(!number)snprintf(name,32,"%s",root.c_str());else snprintf(name,32,"%.20s_s%d",root.c_str(),number);number++;used.push_back(name);
+        int asset=-1;for(int a=0;a<m->assetCount;a++)if(!strcmp(m->assets[a].name,name))asset=a;
+        if(asset<0){if(m->assetCount>=ED_ASSETS)return 0;asset=m->assetCount++;m->assets[asset]={};}
+        EdAsset &a=m->assets[asset];strcpy(a.name,name);a.saved=1;a.lightBaker=lightBaker;a.origin=fallback;
+        if(c<m->count){EdVec center={};int vertices=0;for(const auto &face:pieces[c])for(int v=0;v<face.count;v++){center=edAdd(center,face.v[v].p);vertices++;}
+            EdVec interior={};int corners=0;for(int f=0;f<m->c[c].count;f++)for(int v=0;v<m->c[c].f[f].count;v++){interior=edAdd(interior,m->c[c].f[f].v[v].p);corners++;}
+            a.origin=edAdd(edScale(center,.999/vertices),edScale(interior,.001/corners));
+        }
+        for(int mesh=m->meshCount-1;mesh>=0;mesh--)if(m->meshes[mesh].asset==asset){for(int j=mesh+1;j<m->meshCount;j++)m->meshes[j-1]=std::move(m->meshes[j]);m->meshCount--;}
+        int mesh=-1,vertices=0,triangles=0;
+        for(const EdFace &face:pieces[c]){
+            if(mesh<0||triangles+face.count-2>ED_3DO_MESH_TRIANGLES||vertices+face.count>ED_3DO_MESH_VERTICES){if(m->meshCount>=ED_MESHES)return 0;mesh=m->meshCount++;m->meshes[mesh]={};m->meshes[mesh].asset=asset;vertices=triangles=0;}
+            EdCell &geometry=m->meshes[mesh].geometry;geometry.f[geometry.count++]=face;triangles+=face.count-2;vertices+=face.count;
+        }
+        int t=edTemplateIndex(m,name);if(t<0){if(m->templateCount>=ED_CUSTOM_TEMPLATES)return 0;t=m->templateCount++;m->templates[t]={};}
+        EdTemplate &definition=m->templates[t];strcpy(definition.name,name);strcpy(definition.parent,"_walkstruct");definition.count=1;strcpy(definition.params[0].key,"model3d");snprintf(definition.params[0].value,128,"%s.3do",name);
+        int object=-1;for(int o=0;o<m->objectCount;o++)if(!strcmp(m->objects[o].templateName,name)){object=o;break;}
+        if(object<0){if(m->objectCount>=ED_OBJECTS)return 0;object=m->objectCount++;m->objects[object]={};}
+        strcpy(m->objects[object].templateName,name);m->objects[object].position=a.origin;m->objects[object].rotation={};
+    }
+    for(const auto &name:oldNames)if(std::find(used.begin(),used.end(),name)==used.end())splineRemoveWalkstructPart(m,name.c_str());
+    return edMeshValidate(m);
+}
+int edSplineRepairWalkstructs(EdModel *m){
+    EdModel repaired=*m;int changed=0;
+    for(int i=0;i<repaired.splineCount;i++)if(repaired.splines[i].makeWalkstruct&&!repaired.splines[i].invalid){
+        int parts=0,asset=-1;for(int a=0;a<repaired.assetCount;a++)if(splineOwnsWalkstruct(repaired.splines[i].walkstructName,repaired.assets[a].name)){parts++;asset=a;}
+        if(parts!=1)continue;int cell=-1;for(int c=0;c<repaired.count;c++)if(edContains(&repaired.c[c],repaired.assets[asset].origin)){cell=c;break;}
+        int spans=cell<0;for(int mesh=0;mesh<repaired.meshCount;mesh++)if(repaired.meshes[mesh].asset==asset)for(int f=0;f<repaired.meshes[mesh].geometry.count;f++)for(int v=0;v<repaired.meshes[mesh].geometry.f[f].count;v++)if(cell>=0&&!edContains(&repaired.c[cell],repaired.meshes[mesh].geometry.f[f].v[v].p))spans=1;
+        if(spans){if(!splinePartitionWalkstruct(&repaired,i))return -1;changed=1;}
+    }
+    if(changed){if(!edValidate(&repaired))return -1;*m=std::move(repaired);}return changed;
+}
+static int splineWalkstruct(EdModel *work,int index,int first){
+    EdSpline &s=work->splines[index];
+    if(s.count<2){work->count=first;work->c.resize(first);return 1;}
+    EdModel solid;edDefault(&solid);solid.count=work->count-first;solid.c.clear();if(!solid.count)return 0;
+    for(int c=0;c<solid.count;c++){solid.c[c]=work->c[first+c];solid.c[c].splineId=0;solid.c[c].arrayId=0;for(int f=0;f<solid.c[c].count;f++)solid.c[c].f[f].neighbor=solid.c[c].f[f].mirror=-1;}
+    // Resolve only the generated volume; surrounding level geometry is untouched.
+    if(!edResolve(&solid))return 0;
+    if(!s.walkstructName[0])for(int suffix=0;;suffix++){
+        char name[32];snprintf(name,sizeof(name),"spline%d_%d",s.id,suffix);int used=edTemplateIndex(work,name)>=0;
+        for(int a=0;a<work->assetCount;a++)used|=!strcmp(work->assets[a].name,name);
+        if(!used){strcpy(s.walkstructName,name);break;}
+    }
+    int asset=-1;for(int a=0;a<work->assetCount;a++)if(!strcmp(work->assets[a].name,s.walkstructName)){asset=a;break;}
+    if(asset<0){if(work->assetCount>=ED_ASSETS)return 0;asset=work->assetCount++;work->assets[asset]={};}
+    EdAsset &a=work->assets[asset];strcpy(a.name,s.walkstructName);a.saved=1;a.origin=edSplinePosition(&s,(s.closed?s.count:s.count-1)*.5);
+    // Prefer an origin in a real sector for normal JK thing visibility/collision.
+    int inside=0;for(int c=0;c<first;c++)inside|=edContains(&work->c[c],a.origin);
+    if(!inside)for(int p=0;p<s.count&&!inside;p++)for(int c=0;c<first;c++)if(edContains(&work->c[c],s.points[p].position)){a.origin=s.points[p].position;inside=1;break;}
+    for(int i=work->meshCount-1;i>=0;i--)if(work->meshes[i].asset==asset){for(int j=i+1;j<work->meshCount;j++)work->meshes[j-1]=std::move(work->meshes[j]);work->meshCount--;}
+    int mesh=-1,vertices=0,triangles=0;s.preview.clear();
+    for(int c=0;c<solid.count;c++){EdCell boundary={};for(int f=0;f<solid.c[c].count;f++){
+        EdFace face=solid.c[c].f[f];if(face.neighbor>=0)continue;face.neighbor=face.mirror=-1;
+        std::reverse(face.v,face.v+face.count); // sector inward normals -> solid exterior
+        boundary.f[boundary.count++]=face;
+        if(mesh<0||triangles+face.count-2>ED_3DO_MESH_TRIANGLES||vertices+face.count>ED_3DO_MESH_VERTICES){
+            if(work->meshCount>=ED_MESHES)return 0;mesh=work->meshCount++;work->meshes[mesh]={};work->meshes[mesh].asset=asset;vertices=triangles=0;}
+        EdCell &geometry=work->meshes[mesh].geometry;geometry.f[geometry.count++]=face;vertices+=face.count;triangles+=face.count-2;
+    }if(boundary.count)s.preview[s.preview.size()]=std::move(boundary);}
+    int t=edTemplateIndex(work,s.walkstructName);if(t<0){if(work->templateCount>=ED_CUSTOM_TEMPLATES)return 0;t=work->templateCount++;work->templates[t]={};}
+    EdTemplate &definition=work->templates[t];strcpy(definition.name,s.walkstructName);strcpy(definition.parent,"_walkstruct");definition.count=1;strcpy(definition.params[0].key,"model3d");snprintf(definition.params[0].value,128,"%s.3do",a.name);
+    int object=-1;for(int i=0;i<work->objectCount;i++)if(!strcmp(work->objects[i].templateName,s.walkstructName)){object=i;break;}
+    if(object<0){if(work->objectCount>=ED_OBJECTS)return 0;object=work->objectCount++;work->objects[object]={};}
+    strcpy(work->objects[object].templateName,s.walkstructName);work->objects[object].position=a.origin;work->objects[object].rotation=edV(0,0,0);
+    work->count=first;work->c.resize(first);return splinePartitionWalkstruct(work,index,true);
+}
 static int splineBuild(EdModel *out,const EdModel *source,const EdSpline *spline,int textureHeight,EdBuffer<EdCell> *preview){
     if(textureHeight<1||textureHeight>16384)return 0;
     EdModel work;edCopyModel(&work,source);EdSpline settings=*spline;int index=-1;
     for(int i=0;i<work.splineCount;i++)if(work.splines[i].id==settings.id)index=i;
     if(index<0){if(work.splineCount==ED_SPLINES)return 0;index=work.splineCount++;}
     splineRestoreCuts(&work,work.splines[index]);
+    if(!settings.makeWalkstruct||settings.count<2){splineRemoveWalkstruct(&work,work.splines[index].walkstructName);settings.walkstructName[0]=0;}
     settings.invalid=0;settings.textureHeight=textureHeight;settings.cutBefore.clear();settings.cutAfter.clear();settings.preview.clear();
     work.splines[index]=settings;if(!edSplineValidate(&work))return 0;
     EdBuffer<int> remap;int count=0;
@@ -191,12 +325,17 @@ static int splineBuild(EdModel *out,const EdModel *source,const EdSpline *spline
         }
     }
     }
+    for(int c=count;c<work.count;c++)if(work.c[c].splineId==settings.id){work.c[c].flags=(work.c[c].flags&~settings.sectorFlagsMask)|(settings.sectorFlags&settings.sectorFlagsMask);if(settings.hasSectorTint)work.c[c].tint=settings.sectorTint;}
     int primaryCount=work.count;
     for(int mask=1;mask<8;mask++)if((mask&settings.mirrorAxes)==mask)for(int c=0;c<primaryCount;c++)if(work.c[c].splineId==settings.id){
         if(work.count>=ED_CELLS)return 0;EdCell reflected=work.c[c];int reverse=((mask&1)!=0)^((mask&2)!=0)^((mask&4)!=0);
         for(int f=0;f<reflected.count;f++){EdFace &face=reflected.f[f];for(int v=0;v<face.count;v++){EdVec &p=face.v[v].p;if(mask&1)p.x=-p.x;if(mask&2)p.y=-p.y;if(mask&4)p.z=-p.z;}
             if(reverse)for(int v=0;v<face.count/2;v++)std::swap(face.v[v],face.v[face.count-1-v]);}
         work.c[work.count++]=std::move(reflected);
+    }
+    if(settings.makeWalkstruct){
+        if(!splineWalkstruct(&work,index,count)||!edValidate(&work))return 0;
+        edSplineReconcile(&work);edCopyModel(out,&work);return 1;
     }
     for(int c=0;c<work.count;c++)for(int f=0;f<work.c[c].count;f++){EdFace &face=work.c[c].f[f];face.attributes=edSurfaceAttributes(&face);face.hasAttributes=1;face.neighbor=face.mirror=-1;}
     if(preview&&preview->size()==0)for(int c=count;c<work.count;c++)(*preview)[preview->size()]=work.c[c];
@@ -255,8 +394,13 @@ int edSplineUpdate(EdModel *out,const EdModel *source,const EdSpline *spline,int
 void edSplineReadMetadata(EdModel *m,const char *text){
     EdBuffer<std::vector<unsigned char>> states;
     m->splineCount=0;for(int c=0;c<m->count;c++)m->c[c].splineId=0;
-    for(const char *line=text;line&&*line;line=strchr(line,'\n')){if(*line=='\n')line++;EdSpline s={};int id,point,cell;EdSplinePoint p={};
+    for(const char *cursor=text;cursor&&*cursor;){
+        // Bound scanf to one line: the Windows CRT measures the whole input string.
+        const char *end=strchr(cursor,'\n');std::string row(cursor,end?(size_t)(end-cursor):strlen(cursor));cursor=end?end+1:nullptr;const char *line=row.c_str();EdSpline s={};int id,point,cell;EdSplinePoint p={};
         if(sscanf(line,"# GeoSith spline %d %d %d %d %lf %lf",&s.id,&s.sides,&s.segments,&s.material,&s.width,&s.height)==6&&m->splineCount<ED_SPLINES)m->splines[m->splineCount++]=s;
+        char walkName[32];if(sscanf(line,"# GeoSith splinewalkstruct %d %31s",&id,walkName)==2)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id){m->splines[i].makeWalkstruct=1;if(strcmp(walkName,"-"))snprintf(m->splines[i].walkstructName,32,"%s",walkName);}
+        EdVec tint;if(sscanf(line,"# GeoSith splinetint %d %lf %lf %lf",&id,&tint.x,&tint.y,&tint.z)==4)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id){m->splines[i].hasSectorTint=1;m->splines[i].sectorTint=tint;}
+        unsigned int flags,mask;if(sscanf(line,"# GeoSith splineflags %d %x %x",&id,&flags,&mask)==3)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id){m->splines[i].sectorFlags=flags;m->splines[i].sectorFlagsMask=mask&~0x1000u;}
         int group;if(sscanf(line,"# GeoSith splinegroup %d %d",&id,&group)==2)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id)m->splines[i].groupId=group;
         int axes;if(sscanf(line,"# GeoSith splinemirror %d %d",&id,&axes)==2)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id)m->splines[i].mirrorAxes=axes;
         if(sscanf(line,"# GeoSith splineclosed %d",&id)==1)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id)m->splines[i].closed=1;

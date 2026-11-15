@@ -46,8 +46,17 @@ static int paintLayer(EdMesh &mesh,const char *name){
 int edTerrainPaint(EdModel *m,int asset,EdVec center,double radius,double amount,const char *material,const char*(*name)(int)){
     if(asset<0||asset>=m->assetCount||!m->assets[asset].terrain||!paintNameValid(material)||radius<=0||!isfinite(radius)||!isfinite(amount)||amount<=0||!name)return 0;
     EdModel draft=*m;int group=m->assets[asset].terrainGroup,changed=0;
+    // A linked terrain may span many model assets. Only initialize paint layers
+    // on assets touched by this stamp; otherwise one small dab builds atlases
+    // for every distant patch in the group.
+    std::vector<unsigned char> affected(m->assetCount);
+    for(int i=0;i<m->meshCount;i++){
+        const EdMesh &mesh=m->meshes[i];if(mesh.asset!=asset&&(!group||!m->assets[mesh.asset].terrain||m->assets[mesh.asset].terrainGroup!=group))continue;
+        if(getenv("GEOSITH_TERRAIN_REFERENCE")){affected[mesh.asset]=1;continue;}
+        for(int f=0;f<mesh.geometry.count&&!affected[mesh.asset];f++)for(int v=0;v<3;v++)if(length(edSub(mesh.geometry.f[f].v[v].p,center))<radius){affected[mesh.asset]=1;break;}
+    }
     for(int i=0;i<draft.meshCount;i++){
-        EdMesh &mesh=draft.meshes[i];if(mesh.asset!=asset&&(!group||!draft.assets[mesh.asset].terrain||draft.assets[mesh.asset].terrainGroup!=group))continue;
+        EdMesh &mesh=draft.meshes[i];if(!affected[mesh.asset])continue;
         if(!mesh.paint.size())for(int f=0;f<mesh.geometry.count;f++){
             const char *base=name(mesh.geometry.f[f].material);if(!base||!paintNameValid(base))return 0;
             int l=paintLayer(mesh,base);if(l<0)return 0;for(int v=0;v<3;v++)mesh.paint[l].weights[f*3+v]=1;

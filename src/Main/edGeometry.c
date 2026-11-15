@@ -18,12 +18,27 @@ void edCopyModel(EdModel *out,const EdModel *source){
 int edCellsEqual(const EdCell *a,const EdCell *b){
  if(a->arrayId!=b->arrayId||a->splineId!=b->splineId||std::memcmp(a->colormap,b->colormap,sizeof(a->colormap))||std::memcmp(a->layer,b->layer,sizeof(a->layer))||a->count!=b->count||a->ambientLight!=b->ambientLight||a->extraLight!=b->extraLight||a->flags!=b->flags||a->soundVolume!=b->soundVolume||a->tolerance!=b->tolerance||std::memcmp(&a->tint,&b->tint,sizeof(EdVec))||std::memcmp(&a->thrust,&b->thrust,sizeof(EdVec))||std::memcmp(a->sound,b->sound,32))return 0;
  for(int f=0;f<a->count;f++){const EdFace& x=a->f[f];const EdFace& y=b->f[f];
- if(x.decalId!=y.decalId||x.customUV!=y.customUV||x.count!=y.count||x.material!=y.material||x.neighbor!=y.neighbor||x.mirror!=y.mirror||x.uOffset!=y.uOffset||x.vOffset!=y.vOffset||x.uvRotation!=y.uvRotation||x.hasAttributes!=y.hasAttributes)return 0;
+ if(x.bakedLight!=y.bakedLight||x.decalId!=y.decalId||x.customUV!=y.customUV||x.count!=y.count||x.material!=y.material||x.neighbor!=y.neighbor||x.mirror!=y.mirror||x.uOffset!=y.uOffset||x.vOffset!=y.vOffset||x.uvRotation!=y.uvRotation||x.hasAttributes!=y.hasAttributes)return 0;
  if(x.attributes.surfaceFlags!=y.attributes.surfaceFlags||x.attributes.faceFlags!=y.attributes.faceFlags||x.attributes.adjoinFlags!=y.attributes.adjoinFlags||x.attributes.geometryMode!=y.attributes.geometryMode||x.attributes.textureMode!=y.attributes.textureMode||x.attributes.lightingMode!=y.attributes.lightingMode||x.attributes.portal!=y.attributes.portal||x.attributes.uScale!=y.attributes.uScale||x.attributes.vScale!=y.attributes.vScale||x.attributes.extraLight!=y.attributes.extraLight||x.attributes.adjoinDistance!=y.attributes.adjoinDistance)return 0;
  for(int v=0;v<x.count;v++)if(std::memcmp(&x.v[v],&y.v[v],sizeof(EdVertex)))return 0;
  }return 1;
 }
 int edModelsEqual(const EdModel *a,const EdModel *b){
+ if(a==b)return 1;
+ // Most edits change geometry. Avoid serializing textures and the entire document
+ // just to discover a changed corner in a cell or model mesh.
+ if(a->count!=b->count||a->meshCount!=b->meshCount)return 0;
+ for(int i=0;i<a->count;i++)if(!edCellsEqual(&a->c[i],&b->c[i]))return 0;
+ for(int i=0;i<a->meshCount;i++)if(a->meshes[i].asset!=b->meshes[i].asset||!edCellsEqual(&a->meshes[i].geometry,&b->meshes[i].geometry))return 0;
+ // A paint stamp often changes weights only. Detect it before serializing
+ // the level and its resource payloads just to discover that difference.
+ for(int i=0;i<a->meshCount;i++){
+   const auto &x=a->meshes[i].paint,&y=b->meshes[i].paint;if(x.size()!=y.size())return 0;
+   for(size_t l=0;l<x.size();l++){
+     if(std::memcmp(x[l].material,y[l].material,128)||x[l].weights.size()!=y[l].weights.size())return 0;
+     for(size_t v=0;v<x[l].weights.size();v++)if(x[l].weights[v]!=y[l].weights[v])return 0;
+   }
+ }
  uint32_t an=0,bn=0;unsigned char *aa=edWireEncode(a,&an),*bb=edWireEncode(b,&bn);
  int equal=aa&&bb&&an==bn&&!std::memcmp(aa,bb,an);edFree(aa);edFree(bb);return equal;
 }
@@ -57,7 +72,7 @@ static EdVec snapFaceGrid(const EdFace *face,EdVec p,double grid) {
     return q;
 }
 EdVec edSnapFacePoint(const EdFace *face,EdVec p) {return snapFaceGrid(face,p,ED_GRID);}
-EdVec edSnapMeshFacePoint(const EdFace *face,EdVec p) {return snapFaceGrid(face,p,ED_GRID*.5);}
+EdVec edSnapMeshFacePoint(const EdFace *face,EdVec p,double grid) {return snapFaceGrid(face,p,grid);}
 EdSurfaceAttributes edSurfaceAttributes(const EdFace *face) {
     int portal=face->neighbor>=0;unsigned int solid=4|(edNormal(face).z>.5?1:0);
     EdSurfaceAttributes a=face->hasAttributes?face->attributes:EdSurfaceAttributes{solid,0,7,4,1,3,0,1,1,0,0};
@@ -222,8 +237,8 @@ static int clip(const EdFace *in,EdVec normal,double d,EdFace *out) {
         double da=edDot(normal,a.p)-d,db=edDot(normal,b.p)-d;
         if(da>=-ED_EPS && !push(out,a)) return 0;
         if((da>ED_EPS && db<-ED_EPS)||(da<-ED_EPS && db>ED_EPS)) {
-            double t=da/(da-db); EdVertex v;
-            v.p=edAdd(a.p,edScale(edSub(b.p,a.p),t)); v.u=a.u+(b.u-a.u)*t; v.v=a.v+(b.v-a.v)*t; v.light=a.light+(b.light-a.light)*t;
+            double t=da/(da-db); EdVertex v={};
+            v.lightRGB=edAdd(a.lightRGB,edScale(edSub(b.lightRGB,a.lightRGB),t));v.p=edAdd(a.p,edScale(edSub(b.p,a.p),t)); v.u=a.u+(b.u-a.u)*t; v.v=a.v+(b.v-a.v)*t; v.light=a.light+(b.light-a.light)*t;
             if(!push(out,v)) return 0;
         }
     }
@@ -356,8 +371,11 @@ static int capHull(EdFace *cap,EdVertex *points,int count,EdVec normal){
     for(int i=1;i<count;i++){EdVertex point=points[i];EdVec p=capProject(point.p,axis);int j=i;
         while(j>0){EdVec q=capProject(points[j-1].p,axis);if(q.x<p.x||(q.x==p.x&&q.y<=p.y))break;points[j]=points[j-1];j--;}points[j]=point;
     }
-    for(int i=0;i<count;i++){while(size>=2&&capTurn(points[hull[size-2]],points[hull[size-1]],points[i],axis)<=ED_EPS*ED_EPS)size--;hull[size++]=i;}
-    int lower=size;for(int i=count-2;i>=0;i--){while(size>lower&&capTurn(points[hull[size-2]],points[hull[size-1]],points[i],axis)<=ED_EPS*ED_EPS)size--;hull[size++]=i;}
+    /* Keep the exact turn sign while constructing the hull. A tolerance here
+       can discard an extreme corner when almost-equal sorted coordinates put
+       collinear boundary points out of along-edge order (notably spline cuts). */
+    for(int i=0;i<count;i++){while(size>=2&&capTurn(points[hull[size-2]],points[hull[size-1]],points[i],axis)<=0)size--;hull[size++]=i;}
+    int lower=size;for(int i=count-2;i>=0;i--){while(size>lower&&capTurn(points[hull[size-2]],points[hull[size-1]],points[i],axis)<=0)size--;hull[size++]=i;}
     if(size>1)size--;cap->count=0;if(size<3)return 1;if(size>ED_VERTS){edSurfaceVertexCountAllowed(size);return 0;}
     for(int i=0;i<size;i++)cap->v[cap->count++]=points[hull[i]];
     if(edDot(edNormal(cap),normal)<0)reverse(cap);return 1;
@@ -396,6 +414,7 @@ static int cellclip(const EdCell *in,EdVec n,double d,EdCell *out) {
         if(coplanar)return 1;
     }
     if(!capHull(&cap,points,count,n))return 0;
+
     if(cap.count>=3) {
         if(cap.hasAttributes)cap.attributes.surfaceFlags=(cap.attributes.surfaceFlags&~1u)|(n.z>.5?1u:0u);
         if(!addface(out,cap)) return 0;
@@ -425,7 +444,7 @@ int edContains(const EdCell *c,EdVec p) {
 static int edResourceText(const char *text,size_t capacity){
     const char *end=(const char*)memchr(text,0,capacity);if(!end)return 0;for(const char *p=text;p<end;p++)if(!((*p>='a'&&*p<='z')||(*p>='A'&&*p<='Z')||(*p>='0'&&*p<='9')||*p=='_'||*p=='-'||*p=='.'||*p=='+'))return 0;return 1;
 }
-int edValidate(const EdModel *m) {
+int edValidate(const EdModel *m,const EdModel *validatedSource) {
     if(!edSplineValidate(m)||!edGroupsValidate(m))return 0;
     if(!edMeshValidate(m)){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
     if(m->count<1||m->count>ED_CELLS) {if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
@@ -442,8 +461,8 @@ int edValidate(const EdModel *m) {
         for(int j=0;j<c->count;j++){const EdCogParam *p=&c->params[j];if(p->type<2||p->type>14){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}char value[32];EdCogParam check=*p;edCogParamValue(m,p,value);if(!edCogSetValue(m,&check,value)){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}}
     }
     if(m->lightCount<0||m->lightCount>ED_LIGHTS){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
-    for(int i=0;i<m->lightCount;i++){const EdLight *l=&m->lights[i];if(!isfinite(l->position.x)||!isfinite(l->position.y)||!isfinite(l->position.z)||!isfinite(l->intensity)||!isfinite(l->range)||l->intensity<0||l->intensity>100||l->range<ED_GRID||l->range>10000){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}}
-    for(int s=0;s<m->count;s++) { const EdCell *c=&m->c[s];
+    for(int i=0;i<m->lightCount;i++){const EdLight *l=&m->lights[i];if(!isfinite(l->position.x)||!isfinite(l->position.y)||!isfinite(l->position.z)||!isfinite(l->intensity)||!isfinite(l->range)||!isfinite(l->color.x)||!isfinite(l->color.y)||!isfinite(l->color.z)||l->color.x<0||l->color.x>1||l->color.y<0||l->color.y>1||l->color.z<0||l->color.z>1||l->intensity<0||l->intensity>100||l->range<ED_GRID||l->range>10000){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}}
+    for(int s=0;s<m->count;s++) { if(validatedSource&&s<validatedSource->count&&edCellsEqual(&m->c[s],&validatedSource->c[s]))continue;const EdCell *c=&m->c[s];
         if(!edResourceText(c->colormap,sizeof(c->colormap))||!memchr(c->layer,0,sizeof(c->layer))||!edResourceText(c->sound,sizeof(c->sound))||!isfinite(c->soundVolume)||!isfinite(c->tint.x)||!isfinite(c->tint.y)||!isfinite(c->tint.z)||!isfinite(c->thrust.x)||!isfinite(c->thrust.y)||!isfinite(c->thrust.z))return 0;
         for(const char *p=c->colormap;*p;p++)if(!((*p>='a'&&*p<='z')||(*p>='A'&&*p<='Z')||(*p>='0'&&*p<='9')||*p=='_'||*p=='-'||*p=='.'))return 0;
         for(const char *p=c->layer;*p;p++)if((unsigned char)*p<32||*p=='"')return 0;
@@ -453,10 +472,10 @@ int edValidate(const EdModel *m) {
         for(int f=0;f<c->count;f++) { const EdFace *p=&c->f[f];if(!edSurfaceVertexCountAllowed(p->count)){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}EdVec n=edNormal(p);
             EdSurfaceAttributes a=edSurfaceAttributes(p);
             if((p->customUV!=0&&p->customUV!=1)||!isfinite(p->uvRotation)||!isfinite(a.uScale)||!isfinite(a.vScale)||fabs(a.uScale)<.000001||fabs(a.vScale)<.000001||!isfinite(a.extraLight)||!isfinite(a.adjoinDistance)||a.adjoinDistance<0||a.geometryMode<0||a.geometryMode>4||a.textureMode<0||a.textureMode>4||a.lightingMode<0||a.lightingMode>6){if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation attributes s=%d f=%d u=%g v=%g dist=%g modes=%d/%d/%d\n",s,f,a.uScale,a.vScale,a.adjoinDistance,a.geometryMode,a.textureMode,a.lightingMode);return 0;}
-            if(p->count<3||p->count>ED_VERTS||length(n)<.5) {if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
+            if(p->bakedLight<0||p->bakedLight>1||p->count<3||p->count>ED_VERTS||length(n)<.5) {if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
             for(int j=0;j<p->count;j++) {
                 EdVec q=p->v[j].p;
-                if(!isfinite(p->v[j].light)||!isfinite(p->v[j].u)||!isfinite(p->v[j].v)||!isfinite(q.x)||!isfinite(q.y)||!isfinite(q.z)||fabs(edDot(n,edSub(q,p->v[0].p)))>fmax(ED_EPS*4,c->tolerance)||!edContains(c,q)) {if(getenv("GEOSITH_STOCK_TEST")){double worst=0;int wf=-1;for(int k=0;k<c->count;k++){double d=edDot(edNormal(&c->f[k]),edSub(q,c->f[k].v[0].p));if(d<worst){worst=d;wf=k;}}fprintf(stderr,"Worst plane %g face %d\n",worst,wf);fprintf(stderr,"Validation failure line %d sector=%d face=%d vertex=%d plane=%.9g contains=%d\n",__LINE__,s,f,j,fabs(edDot(n,edSub(q,p->v[0].p))),edContains(c,q));}return 0;}
+                if(!isfinite(p->v[j].lightRGB.x)||!isfinite(p->v[j].lightRGB.y)||!isfinite(p->v[j].lightRGB.z)||!isfinite(p->v[j].light)||!isfinite(p->v[j].u)||!isfinite(p->v[j].v)||!isfinite(q.x)||!isfinite(q.y)||!isfinite(q.z)||fabs(edDot(n,edSub(q,p->v[0].p)))>fmax(ED_EPS*4,c->tolerance)||!edContains(c,q)) {if(getenv("GEOSITH_STOCK_TEST")){double worst=0;int wf=-1;for(int k=0;k<c->count;k++){double d=edDot(edNormal(&c->f[k]),edSub(q,c->f[k].v[0].p));if(d<worst){worst=d;wf=k;}}fprintf(stderr,"Worst plane %g face %d\n",worst,wf);fprintf(stderr,"Validation failure line %d sector=%d face=%d vertex=%d plane=%.9g contains=%d\n",__LINE__,s,f,j,fabs(edDot(n,edSub(q,p->v[0].p))),edContains(c,q));}return 0;}
                 EdVec a=edSub(p->v[(j+1)%p->count].p,q),b=edSub(p->v[(j+2)%p->count].p,p->v[(j+1)%p->count].p);
                 if(edDot(edCross(a,b),n)<-fmax(ED_EPS,c->tolerance*(length(a)+length(b)))) {if(getenv("GEOSITH_STOCK_TEST"))fprintf(stderr,"Validation failure line %d\n",__LINE__);return 0;}
             }
@@ -497,22 +516,52 @@ static int rayFaces(const EdModel *m,EdVec o,EdVec d,EdHit *h,int includeAdjoins
 int edRay(const EdModel *m,EdVec o,EdVec d,EdHit *h) {return rayFaces(m,o,d,h,0);}
 int edRaySelection(const EdModel *m,EdVec o,EdVec d,EdHit *h) {return rayFaces(m,o,d,h,1);}
 int edRayMaterial(const EdModel *m,EdVec o,EdVec d,EdHit *h) {return rayFaces(m,o,d,h,2);}
-double edVertexLight(const EdModel *m,int cell,int face,int vertex) {
+struct EdLightCell {EdVec lo,hi;std::vector<EdVec> normals;};
+static int lightRayBounds(EdVec o,EdVec d,EdVec lo,EdVec hi,double limit){
+    double low=0,high=limit;for(int a=0;a<3;a++){double x=(&o.x)[a],v=(&d.x)[a],mn=(&lo.x)[a]-ED_EPS*16,mx=(&hi.x)[a]+ED_EPS*16;
+        if(fabs(v)<1e-15){if(x<mn||x>mx)return 0;}else{double p=(mn-x)/v,q=(mx-x)/v;if(p>q)std::swap(p,q);low=fmax(low,p);high=fmin(high,q);if(low>high)return 0;}}
+    return 1;
+}
+static int lightOccluded(const EdModel *m,const std::vector<EdLightCell> &cells,EdVec o,EdVec d,double limit){
+    limit=fmin(1000,limit);
+    for(int s=0;s<m->count;s++){
+        const auto &cache=cells[s];if(!lightRayBounds(o,d,cache.lo,cache.hi,limit))continue;
+        for(int i=0;i<m->c[s].count;i++){
+            const EdFace &f=m->c[s].f[i];if(f.neighbor>=0)continue;EdVec n=cache.normals[i];double den=edDot(n,d);if(den>=-ED_EPS)continue;
+            double t=edDot(n,edSub(f.v[0].p,o))/den;if(t<0||t>=limit)continue;EdVec p=edAdd(o,edScale(d,t));int inside=1;
+            for(int j=0;j<f.count;j++)if(edDot(edCross(edSub(f.v[(j+1)%f.count].p,f.v[j].p),edSub(p,f.v[j].p)),n)<-ED_EPS){inside=0;break;}
+            if(inside)return 1;
+        }
+    }return 0;
+}
+static double vertexLight(const EdModel *m,int cell,int face,int vertex,const std::vector<EdLightCell> *cache) {
     const EdCell *c=&m->c[cell];const EdFace *f=&c->f[face];EdVec point=f->v[vertex].p,normal=edNormal(f),center=edV(0,0,0);int count=0;
-    if(!m->lightCount)return f->v[vertex].light;
+    if(f->bakedLight||!m->lightCount)return f->v[vertex].light;
     for(int i=0;i<c->count;i++)for(int v=0;v<c->f[i].count;v++){center=edAdd(center,c->f[i].v[v].p);count++;}
     /* Move the visibility endpoint inside every incident wall at a corner. */
     EdVec sample=edAdd(point,edScale(unit(edSub(edScale(center,1.0/count),point)),ED_EPS*16));double value=f->v[vertex].light;
     for(int i=0;i<m->lightCount;i++){
         const EdLight *l=&m->lights[i];EdVec delta=edSub(l->position,point);double distance=length(delta);
-        if(l->intensity<=0||distance>=l->range)continue;
+        if((l->type&0x3e)||l->intensity<=0||distance>=l->range)continue;
         double incidence=distance>ED_EPS?fmax(0,edDot(normal,edScale(delta,1.0/distance))):1;if(incidence<=0)continue;
         EdVec travel=edSub(sample,l->position);double traceDistance=length(travel);EdHit hit;
-        if(traceDistance>ED_EPS&&edRay(m,l->position,edScale(travel,1.0/traceDistance),&hit)&&hit.distance<traceDistance-ED_EPS*8)continue;
+        if(traceDistance>ED_EPS){EdVec direction=edScale(travel,1.0/traceDistance);double limit=traceDistance-ED_EPS*8;
+            if(cache?lightOccluded(m,*cache,l->position,direction,limit):(edRay(m,l->position,direction,&hit)&&hit.distance<limit))continue;}
         value+=l->intensity*(1-distance/l->range)*incidence;
     }
     return fmin(1,value);
 }
+double edVertexLight(const EdModel *m,int cell,int face,int vertex){return vertexLight(m,cell,face,vertex,nullptr);}
+void edComputeVertexLights(const EdModel *m,std::vector<double> &lights){
+    std::vector<EdLightCell> cells(m->count);
+    for(int s=0;s<m->count;s++){auto &c=cells[s];c.lo=edV(1e30,1e30,1e30);c.hi=edV(-1e30,-1e30,-1e30);
+        for(int f=0;f<m->c[s].count;f++){const auto &face=m->c[s].f[f];c.normals.push_back(edNormal(&face));for(int v=0;v<face.count;v++)for(int a=0;a<3;a++){(&c.lo.x)[a]=fmin((&c.lo.x)[a],(&face.v[v].p.x)[a]);(&c.hi.x)[a]=fmax((&c.hi.x)[a],(&face.v[v].p.x)[a]);}}}
+    lights.clear();for(int s=0;s<m->count;s++)for(int f=0;f<m->c[s].count;f++)for(int v=0;v<m->c[s].f[f].count;v++){
+        double value=vertexLight(m,s,f,v,&cells);lights.push_back(value);
+        if(getenv("GEOSITH_VERTEX_LOOKUP_TEST")&&fabs(value-edVertexLight(m,s,f,v))>1e-12){fprintf(stderr,"Lighting cache differs from reference\n");abort();}
+    }
+}
+
 int edVertexSlideAxis(const EdModel *m,EdHit hit,EdVec *axis) {
     if(hit.cell<0||hit.cell>=m->count||hit.vertex<0)return 0;
     EdVec point=m->c[hit.cell].f[hit.face].v[hit.vertex].p;
@@ -528,7 +577,7 @@ int edVertexSlideAxis(const EdModel *m,EdHit hit,EdVec *axis) {
     }
     return 0;
 }
-EdVec edVertexEdgeDelta(const EdModel *m,EdHit hit,EdVec delta) {
+EdVec edVertexEdgeDelta(const EdModel *m,EdHit hit,EdVec delta,double grid) {
     if(hit.cell<0||hit.cell>=m->count||hit.face<0||hit.face>=m->c[hit.cell].count||hit.vertex<0||hit.vertex>=m->c[hit.cell].f[hit.face].count)return edV(0,0,0);
     EdVec point=m->c[hit.cell].f[hit.face].v[hit.vertex].p,preferred,best=edV(0,0,0);double score=0,limit=0;
     int sliding=edVertexSlideAxis(m,hit,&preferred);
@@ -543,19 +592,35 @@ EdVec edVertexEdgeDelta(const EdModel *m,EdHit hit,EdVec delta) {
             if(amount>score+ED_EPS||(amount>0&&fabs(amount-score)<ED_EPS&&distance<limit)){score=amount;best=axis;limit=distance;}
         }
     }
-    double distance=score>=limit-ED_GRID*.5?limit:fmin(limit,fmax(0,round(score/ED_GRID)*ED_GRID));
+    double distance=score>=limit-grid*.5?limit:fmin(limit,fmax(0,round(score/grid)*grid));
     return edScale(best,distance);
 }
-int edCleave(EdModel *m,int s,int f,EdVec a,EdVec b) {
-    if(s>=0&&s<m->count&&m->c[s].splineId)return 0;
-    if(s<0||s>=m->count||f<0||f>=m->c[s].count) return 0;
-    EdCell *c=&m->c[s]; EdFace original=c->f[f],left,right;
-    a=edSnapFacePoint(&original,a);b=edSnapFacePoint(&original,b);
-    if(original.neighbor>=0 || length(edSub(a,b))<ED_EPS) return 0;
-    EdVec n=unit(edCross(edNormal(&original),edSub(b,a))); double d=edDot(n,a);
-    if(!clip(&original,n,d,&left)||!clip(&original,edScale(n,-1),-d,&right)||!left.count||!right.count||c->count==ED_FACES) return 0;
+// Split both sides of a portal together; keep each side's UVs and flags.
+int edCleaveFacePlane(EdModel *m,int s,int f,EdVec n,EdVec point) {
+    if(s<0||s>=m->count||f<0||f>=m->c[s].count||m->c[s].splineId)return 0;
+    if(!isfinite(n.x)||!isfinite(n.y)||!isfinite(n.z)||length(n)<ED_EPS||!isfinite(point.x)||!isfinite(point.y)||!isfinite(point.z))return 0;
+    n=unit(n);double d=edDot(n,point);EdFace original=m->c[s].f[f],left,right,otherLeft,otherRight;
+    int neighbor=original.neighbor,mirror=original.mirror;
+    int positive=0,negative=0;for(int v=0;v<original.count;v++){double distance=edDot(n,original.v[v].p)-d;positive|=distance>ED_EPS;negative|=distance<-ED_EPS;}if(!positive||!negative)return 0;
+    if(!clip(&original,n,d,&left)||!clip(&original,edScale(n,-1),-d,&right)||!left.count||!right.count||m->c[s].count>=ED_FACES)return 0;
     if(!edSurfaceVertexCountAllowed(left.count)||!edSurfaceVertexCountAllowed(right.count))return 0;
-    c->f[f]=left; c->f[c->count++]=right;edMapWorld(m); return 1;
+    if(neighbor>=0){
+        if(neighbor>=m->count||neighbor==s||mirror<0||mirror>=m->c[neighbor].count||m->c[neighbor].splineId||m->c[neighbor].count>=ED_FACES)return 0;
+        const EdFace &other=m->c[neighbor].f[mirror];if(other.neighbor!=s||other.mirror!=f)return 0;
+        if(!clip(&other,n,d,&otherLeft)||!clip(&other,edScale(n,-1),-d,&otherRight)||!otherLeft.count||!otherRight.count)return 0;
+        if(!edSurfaceVertexCountAllowed(otherLeft.count)||!edSurfaceVertexCountAllowed(otherRight.count))return 0;
+        int appended=m->c[s].count,otherAppended=m->c[neighbor].count;
+        left.neighbor=right.neighbor=neighbor;otherLeft.neighbor=otherRight.neighbor=s;
+        left.mirror=mirror;right.mirror=otherAppended;otherLeft.mirror=f;otherRight.mirror=appended;
+        m->c[neighbor].f[mirror]=otherLeft;m->c[neighbor].f[m->c[neighbor].count++]=otherRight;
+    }
+    m->c[s].f[f]=left;m->c[s].f[m->c[s].count++]=right;edMapWorld(m);return 1;
+}
+int edCleave(EdModel *m,int s,int f,EdVec a,EdVec b) {
+    if(s<0||s>=m->count||f<0||f>=m->c[s].count)return 0;
+    const EdFace &face=m->c[s].f[f];a=edSnapFacePoint(&face,a);b=edSnapFacePoint(&face,b);
+    if(length(edSub(a,b))<ED_EPS)return 0;
+    return edCleaveFacePlane(m,s,f,edCross(edNormal(&face),edSub(b,a)),a);
 }
 int edShapePoints(const EdFace *face,EdVec center,double radius,int sides,double degrees,EdVec points[32]){
     if(!face||sides<3||sides>32||!isfinite(degrees)||!isfinite(radius)||radius<ED_GRID||!isfinite(center.x)||!isfinite(center.y)||!isfinite(center.z))return 0;
@@ -584,9 +649,18 @@ int edCleaveShapeRotated(EdModel *m,int s,int f,EdVec center,double radius,int s
     if(s>=0&&s<m->count&&m->c[s].splineId)return 0;
     if(s<0||s>=m->count||f<0||f>=m->c[s].count)return 0;
     const EdFace *original=&m->c[s].f[f];EdFace outline;EdVec n=edNormal(original);
-    if(original->neighbor>=0)return 0;int clipped=edClipShape(original,center,radius,sides,degrees,&outline);
+    int clipped=edClipShape(original,center,radius,sides,degrees,&outline);
     if(clipped<0){edSurfaceVertexCountAllowed(ED_VERTS+1);return 0;}
     if(!clipped||!edSurfaceVertexCountAllowed(outline.count))return 0;
+    if(original->neighbor>=0){
+        EdModel work=*m;int cuts=0;
+        for(int e=0;e<outline.count;e++){
+            EdVec a=outline.v[e].p,b=outline.v[(e+1)%outline.count].p,edge=unit(edCross(n,edSub(b,a)));
+            const EdFace &remaining=work.c[s].f[f];int pos=0,neg=0;for(int v=0;v<remaining.count;v++){double d=edDot(edge,edSub(remaining.v[v].p,a));pos|=d>ED_EPS;neg|=d<-ED_EPS;}
+            if(pos&&neg){if(!edCleaveFacePlane(&work,s,f,edge,a))return 0;cuts++;}
+        }
+        if(!cuts||!edValidate(&work))return 0;*m=std::move(work);return 1;
+    }
     /* Partition around the actual intersection. Edges inherited from the
        original boundary produce no outside piece, leaving a flat floor/side. */
     EdCell *out=edAlloc(sizeof(*out));if(!out)return 0;*out=m->c[s];EdFace remaining=*original,inside,outside;int ok=1;
@@ -620,6 +694,28 @@ int edCleaveSectorsPlane(EdModel *m,const EdBuffer<unsigned char>& selected,EdVe
     }
     if(ok)ok=edValidate(out)&&edResolve(out);if(ok)edCopyModel(m,out);edFree(out);edFree(halves);return ok;
 }
+int edCleaveSectorShape(EdModel *m,int s,int f,EdVec center,double radius,int sides,double degrees){
+    if(s<0||s>=m->count||f<0||f>=m->c[s].count||m->c[s].splineId)return 0;
+    const EdFace &face=m->c[s].f[f];EdFace outline;int clipped=edClipShape(&face,center,radius,sides,degrees,&outline);
+    if(clipped<0){edSurfaceVertexCountAllowed(ED_VERTS+1);return 0;}
+    if(!clipped||!edSurfaceVertexCountAllowed(outline.count))return 0;
+    EdModel work=*m;EdCell remaining=m->c[s];EdVec normal=edNormal(&face);int cuts=0;
+    // Keep the polygon's interior in the original sector slot. Each edge cuts
+    // off one convex outside piece, rather than cutting all previous pieces.
+    for(int e=0;e<outline.count;e++){
+        EdVec point=outline.v[e].p,edge=unit(edCross(normal,edSub(outline.v[(e+1)%outline.count].p,point)));
+        EdCell inside,outside;double distance=edDot(edge,point);
+        if(!cellclip(&remaining,edge,distance,&inside)||!cellclip(&remaining,edScale(edge,-1),-distance,&outside)||!inside.count)return 0;
+        if(outside.count){if(work.count==ED_CELLS){sectorLimitError=1;return 0;}work.c[work.count++]=std::move(outside);cuts++;}
+        remaining=std::move(inside);
+    }
+    if(!cuts)return 0;work.c[s]=std::move(remaining);
+    for(int i=0;i<work.cogCount;i++)for(int j=0;j<work.cogs[i].count;j++){
+        EdCogParam *p=&work.cogs[i].params[j];if(p->type==ED_COG_SURFACE&&p->cell==s&&p->face>=0&&p->face<m->c[s].count)remapCogSurface(p,&m->c[s].f[p->face],&work);
+    }
+    if(!edValidate(&work)||!edResolve(&work))return 0;
+    *m=std::move(work);return 1;
+}
 int edCleaveSector(EdModel *m,int s,int f,EdVec a,EdVec b) {
     if(s<0||s>=m->count||f<0||f>=m->c[s].count||m->count==ED_CELLS)return 0;
     const EdFace *face=&m->c[s].f[f];a=edSnapFacePoint(face,a);b=edSnapFacePoint(face,b);
@@ -644,16 +740,41 @@ static int matchingPortalFaces(const EdFace *a,const EdFace *b){
         }
     }return 1;
 }
-int edResolve(EdModel *m) {
+struct EdResolveBounds {EdVec low,high;};
+static EdResolveBounds resolveBounds(const EdCell &cell){
+    EdResolveBounds b={edV(1e30,1e30,1e30),edV(-1e30,-1e30,-1e30)};
+    for(int f=0;f<cell.count;f++)for(int v=0;v<cell.f[f].count;v++){EdVec p=cell.f[f].v[v].p;
+        b.low=edV(fmin(b.low.x,p.x),fmin(b.low.y,p.y),fmin(b.low.z,p.z));b.high=edV(fmax(b.high.x,p.x),fmax(b.high.y,p.y),fmax(b.high.z,p.z));}
+    return b;
+}
+static int resolveBoundsSeparate(const EdResolveBounds &a,const EdResolveBounds &b){
+    // Retain touching/nearby cells for exact clipping and portal matching.
+    const double padding=ED_IMPORT_EPS*4;
+    return a.high.x+padding<b.low.x||b.high.x+padding<a.low.x||a.high.y+padding<b.low.y||b.high.y+padding<a.low.y||a.high.z+padding<b.low.z||b.high.z+padding<a.low.z;
+}
+int edResolve(EdModel *m,int useBounds,const EdModel *validatedSource) {
+    if(getenv("GEOSITH_MOVE_REFERENCE"))validatedSource=nullptr;
+    EdBuffer<unsigned char> dirty;
+    if(validatedSource&&validatedSource->count==m->count)for(int s=0;s<m->count;s++)dirty[s]=!edCellsEqual(&m->c[s],&validatedSource->c[s]);
+    else validatedSource=nullptr;
+    EdBuffer<EdResolveBounds> bounds;if(useBounds)for(int s=0;s<m->count;s++)bounds[s]=resolveBounds(m->c[s]);
     EdModel *out=(EdModel*)edCalloc(1,sizeof(EdModel)); EdCell *remain=(EdCell*)edAlloc(sizeof(EdCell)),*inside=(EdCell*)edAlloc(sizeof(EdCell)),*outside=(EdCell*)edAlloc(sizeof(EdCell));
     if(!out||!remain||!inside||!outside) { edFree(out); edFree(remain); edFree(inside); edFree(outside); return 0; }
     /* Preserve all authored document data, including the model/template library. */
     *out=*m;out->c.clear();out->count=0;int ok=1;
     for(int s=0;s<m->count && ok;s++) {
+        if(validatedSource){
+            int possible=0;for(int old=0;old<s&&!possible;old++)if((dirty[s]||dirty[old])&&(!useBounds||!resolveBoundsSeparate(bounds[s],bounds[old])))possible=1;
+            if(!possible){out->c[out->count++]=m->c[s];continue;}
+        }
         /* Work list contains fragments of this input cell after each subtraction. */
         EdModel *fragments=(EdModel*)edCalloc(1,sizeof(EdModel)); if(!fragments) { ok=0; break; }
         fragments->count=1; fragments->c[0]=m->c[s];
         for(int old=0;old<s && ok;old++) {
+            // Moving a corner cannot create an overlap between two untouched
+            // sectors. Keep their existing geometry rather than clipping again.
+            if(validatedSource&&!dirty[s]&&!dirty[old])continue;
+            if(useBounds&&resolveBoundsSeparate(bounds[s],bounds[old]))continue;
             int count=fragments->count; fragments->count=0;
             EdCell *pieces=(EdCell*)edAlloc(sizeof(EdCell)*count); if(!pieces) { ok=0; break; }
             edCopy(pieces,fragments->c,sizeof(EdCell)*count);
@@ -680,13 +801,19 @@ int edResolve(EdModel *m) {
         for(int p=0;p<fragments->count && ok;p++) { if(out->count==ED_CELLS){sectorLimitError=1;ok=0;} else out->c[out->count++]=fragments->c[p]; }
         edFree(fragments);
     }
+    EdBuffer<unsigned char> portalDirty;
+    if(validatedSource)for(int s=0;s<out->count;s++)portalDirty[s]=s>=validatedSource->count||!edCellsEqual(&out->c[s],&validatedSource->c[s]);
     /* Partition coplanar opposing polygons by one another's edges, then pair
        identical pieces. This creates partial portals without overlapping cells. */
     if(ok)for(int s=0;s<out->count;s++)for(int f=0;f<out->c[s].count;f++){
         EdFace *face=&out->c[s].f[f];
         face->neighbor=face->mirror=-1;
     }
+    if(ok&&useBounds)for(int s=0;s<out->count;s++)bounds[s]=resolveBounds(out->c[s]);
+
     if(ok) for(int s=0;s<out->count && ok;s++) for(int t=s+1;t<out->count && ok;t++) {
+        if(validatedSource&&!portalDirty[s]&&!portalDirty[t])continue;
+        if(useBounds&&resolveBoundsSeparate(bounds[s],bounds[t]))continue;
         for(int a=0;a<out->c[s].count && ok;a++) for(int b=0;b<out->c[t].count && ok;b++) {
             EdFace fa=out->c[s].f[a],fb=out->c[t].f[b]; EdVec n=edNormal(&fa);
             if(edDot(n,edNormal(&fb))>-.99999||fabs(edDot(n,edSub(fb.v[0].p,fa.v[0].p)))>ED_EPS) continue;
@@ -701,6 +828,7 @@ int edResolve(EdModel *m) {
             EdVec areaVector=edV(0,0,0);double perimeter=0;
             for(int v=0;v<intersection.count;v++){EdVec a=intersection.v[v].p,b=intersection.v[(v+1)%intersection.count].p;perimeter+=length(edSub(b,a));areaVector=edAdd(areaVector,edCross(edSub(a,intersection.v[0].p),edSub(b,intersection.v[0].p)));}
             if(length(areaVector)<=ED_EPS*perimeter)continue;
+            portalDirty[s]=portalDirty[t]=1;
             /* Split both polygons into the shared region and convex leftovers. */
             for(int side=0;side<2 && ok;side++) {
                 EdCell *cell=side?&out->c[t]:&out->c[s]; int index=side?b:a;
@@ -718,18 +846,24 @@ int edResolve(EdModel *m) {
     /* Later partitions can replace faces paired earlier in the loop. Rebuild
        reciprocal indices from the final boundaries, never the old indices. */
     if(ok){
+        const int finalBounds=useBounds&&!getenv("GEOSITH_MOVE_REFERENCE");
         for(int s=0;s<out->count;s++)for(int f=0;f<out->c[s].count;f++)out->c[s].f[f].neighbor=out->c[s].f[f].mirror=-1;
-        for(int s=0;s<out->count;s++)for(int t=s+1;t<out->count;t++)for(int a=0;a<out->c[s].count;a++)if(out->c[s].f[a].neighbor<0)
-            for(int b=0;b<out->c[t].count;b++)if(out->c[t].f[b].neighbor<0&&matchingPortalFaces(&out->c[s].f[a],&out->c[t].f[b])){
-                out->c[s].f[a].neighbor=t;out->c[s].f[a].mirror=b;out->c[t].f[b].neighbor=s;out->c[t].f[b].mirror=a;break;
-            }
+        for(int s=0;s<out->count;s++)for(int t=s+1;t<out->count;t++){
+            // The final portal repair used to discard the broad-phase bounds
+            // and compare every face against every face in the entire level.
+            if(finalBounds&&resolveBoundsSeparate(bounds[s],bounds[t]))continue;
+            for(int a=0;a<out->c[s].count;a++)if(out->c[s].f[a].neighbor<0)
+                for(int b=0;b<out->c[t].count;b++)if(out->c[t].f[b].neighbor<0&&matchingPortalFaces(&out->c[s].f[a],&out->c[t].f[b])){
+                    out->c[s].f[a].neighbor=t;out->c[s].f[a].mirror=b;out->c[t].f[b].neighbor=s;out->c[t].f[b].mirror=a;break;
+                }
+        }
     }
     if(ok)for(int i=0;i<out->cogCount;i++)for(int j=0;j<out->cogs[i].count;j++){
         EdCogParam *p=&out->cogs[i].params[j];if(p->cell<0||p->cell>=m->count)continue;
         if(p->type==ED_COG_SECTOR){EdVec center=edV(0,0,0);int count=0;const EdCell *cell=&m->c[p->cell];for(int f=0;f<cell->count;f++)for(int v=0;v<cell->f[f].count;v++){center=edAdd(center,cell->f[f].v[v].p);count++;}center=edScale(center,1.0/count);p->cell=-1;for(int s=0;s<out->count;s++)if(edContains(&out->c[s],center)){p->cell=s;break;}}
         else if(p->type==ED_COG_SURFACE&&p->face>=0&&p->face<m->c[p->cell].count)remapCogSurface(p,&m->c[p->cell].f[p->face],out);
     }
-    if(ok && edValidate(out)) {edMapWorld(out);edCopyModel(m,out);} else ok=0;
+    if(ok && edValidate(out,validatedSource)) {edMapWorld(out);edCopyModel(m,out);} else ok=0;
     edFree(out); edFree(remain); edFree(inside); edFree(outside); return ok;
 }
 static int dissolvePointOnFace(const EdFace *face,EdVec point){
@@ -824,6 +958,8 @@ int edDeleteHandle(EdModel *m,EdHit hit){
 /* Cleanup preserves texture mapping, flags and rendering settings as well as
    the material. A portal can only merge if its reciprocal patches can too. */
 static int cleanupCompatible(const EdFace *a,const EdFace *b){
+    // Removing baked vertices would erase lighting detail. Re-bake after geometry cleanup.
+    if(a->bakedLight||b->bakedLight)return 0;
     if(a->customUV||b->customUV||a->material!=b->material||a->neighbor!=b->neighbor||a->uOffset!=b->uOffset||a->vOffset!=b->vOffset||a->uvRotation!=b->uvRotation)return 0;
     EdVec n=edNormal(a);if(edDot(n,edNormal(b))<.99999)return 0;
     for(int v=0;v<b->count;v++)if(fabs(edDot(n,edSub(b->v[v].p,a->v[0].p)))>ED_EPS)return 0;
@@ -848,7 +984,7 @@ static int cleanupMerge(EdModel *m,int sector,const EdBuffer<unsigned char>& gro
     if(!removed)return 0;
     int neighbor=merged.neighbor,mirrorSeed=-1;EdBuffer<unsigned char> mirrors;EdFace mirror;
     if(neighbor>=0){
-        if(neighbor>=m->count||neighbor==sector)return 0;EdCell *other=&m->c[neighbor];
+        if(neighbor>=m->count||neighbor==sector||m->c[neighbor].splineId)return 0;EdCell *other=&m->c[neighbor];
         for(int f=0;f<cell->count;f++)if(group[f]){
             int g=cell->f[f].mirror;if(g<0||g>=other->count||other->f[g].neighbor!=sector||other->f[g].mirror!=f)return 0;
             if(mirrorSeed<0)mirrorSeed=g;else if(!cleanupCompatible(&other->f[mirrorSeed],&other->f[g]))return 0;mirrors[g]=1;
@@ -1176,7 +1312,18 @@ static int moveSelection(EdModel *m,const EdModel *original,const EdSelection *s
     if(!isfinite(delta.x)||!isfinite(delta.y)||!isfinite(delta.z))return 0;
     int handles=0;for(int i=0;i<selection->count;i++){if(!validHit(original,selection->hits[i]))return 0;if(selection->hits[i].vertex>=0||selection->hits[i].edge>=0)handles=1;}
     if(xy==1)delta=edSelectionDeltaXY(original,selection,delta);else if(!xy)delta=edSelectionDelta(original,selection,delta);edCopyModel(m,original);
-    if(handles)for(int s=0;s<m->count;s++){
+    // Only sectors near the original selection can contain corners that move.
+    // Include the whole selected face for surface picks, and the chosen points
+    // for edge/vertex picks, so shared corners on adjacent sectors move together.
+    EdResolveBounds region={edV(1e30,1e30,1e30),edV(-1e30,-1e30,-1e30)};
+    for(int h=0;h<selection->count;h++){EdHit hit=selection->hits[h];const EdFace &face=original->c[hit.cell].f[hit.face];
+        for(int v=0;v<face.count;v++)if((hit.vertex<0||v==hit.vertex)&&(hit.edge<0||v==hit.edge||v==(hit.edge+1)%face.count)){
+            EdVec p=face.v[v].p;for(int axis=0;axis<3;axis++){(&region.low.x)[axis]=fmin((&region.low.x)[axis],(&p.x)[axis]);(&region.high.x)[axis]=fmax((&region.high.x)[axis],(&p.x)[axis]);}
+        }
+    }
+    EdBuffer<unsigned char> nearby;int reference=getenv("GEOSITH_MOVE_REFERENCE")!=NULL;
+    for(int s=0;s<m->count;s++)nearby[s]=reference||!resolveBoundsSeparate(region,resolveBounds(m->c[s]));
+    if(handles)for(int s=0;s<m->count;s++)if(nearby[s]){
         int affected=0;
         for(int h=0;h<selection->count&&!affected;h++){
             EdHit hit=selection->hits[h];const EdFace *face=&original->c[hit.cell].f[hit.face];
@@ -1185,7 +1332,7 @@ static int moveSelection(EdModel *m,const EdModel *original,const EdSelection *s
         }
         if(affected&&!connectCellEdges(&m->c[s]))return 0;
     }
-    for(int s=0;s<m->count;s++) for(int f=0;f<m->c[s].count;f++) for(int v=0;v<m->c[s].f[f].count;v++) {
+    for(int s=0;s<m->count;s++) if(nearby[s])for(int f=0;f<m->c[s].count;f++) for(int v=0;v<m->c[s].f[f].count;v++) {
         EdVec p=m->c[s].f[f].v[v].p; int move=0;
         for(int h=0;h<selection->count&&!move;h++) {
             EdHit hit=selection->hits[h];const EdFace *selected=&original->c[hit.cell].f[hit.face];
@@ -1197,7 +1344,7 @@ static int moveSelection(EdModel *m,const EdModel *original,const EdSelection *s
     for(int s=0;s<original->count;s++)if(original->c[s].splineId&&!edCellsEqual(&original->c[s],&m->c[s]))return 0;
     /* Preserve planar face partitions during cleanup rather than discarding
        all cleave lines by rebuilding the entire sector hull. */
-    if(handles)for(int s=0;s<m->count;s++)for(int f=0;f<m->c[s].count;) {
+    if(handles)for(int s=0;s<m->count;s++)if(nearby[s])for(int f=0;f<m->c[s].count;) {
         EdFace *face=&m->c[s].f[f];
         for(int v=0;v<face->count&&face->count>1;) {int next=(v+1)%face->count;
             if(same(face->v[v].p,face->v[next].p)){memmove(&face->v[next],&face->v[next+1],sizeof(EdVertex)*(face->count-next-1));face->count--;v=0;}else v++;
@@ -1206,12 +1353,12 @@ static int moveSelection(EdModel *m,const EdModel *original,const EdSelection *s
             for(int i=0;i<m->cogCount;i++)for(int j=0;j<m->cogs[i].count;j++){EdCogParam *p=&m->cogs[i].params[j];if(p->type==ED_COG_SURFACE&&p->cell==s){if(p->face==f)p->cell=p->face=-1;else if(p->face>f)p->face--;}}
             for(int i=f;i+1<m->c[s].count;i++)m->c[s].f[i]=m->c[s].f[i+1];m->c[s].count--;}else f++;
     }
-    if(!edValidate(m))for(int s=0;s<m->count;s++)if(edCompare(&m->c[s],&original->c[s],sizeof(EdCell))){
+    if(!edValidate(m,reference?nullptr:original))for(int s=0;s<m->count;s++)if(edCompare(&m->c[s],&original->c[s],sizeof(EdCell))){
         EdCell *before=m->cogCount?(EdCell*)edAlloc(sizeof(*before)):NULL;if(m->cogCount&&!before)return 0;if(before)*before=m->c[s];
         if(!repairCell(&m->c[s])){edFree(before);return 0;}
         if(before)for(int i=0;i<m->cogCount;i++)for(int j=0;j<m->cogs[i].count;j++){EdCogParam *p=&m->cogs[i].params[j];if(p->type==ED_COG_SURFACE&&p->cell==s&&p->face>=0&&p->face<before->count)remapCogSurface(p,&before->f[p->face],m);}edFree(before);
     }
-    return edValidate(m)&&edResolve(m);
+    return edValidate(m,reference?nullptr:original)&&edResolve(m,1,original);
 }
 int edMoveSelection(EdModel *m,const EdModel *original,const EdSelection *selection,EdVec delta){return moveSelection(m,original,selection,delta,0);}
 int edScaleSelection(EdModel *out,const EdModel *source,const EdSelection *selection,const EdBuffer<unsigned char>& sectors,double factor,EdVec *pivot){
@@ -1308,7 +1455,7 @@ void edSelectionRemap(const EdModel *from,const EdModel *to,const EdSelection *s
 }
 #include "edMesh.h"
 
-unsigned int edCellHash(const EdCell *c){EdWire measure={NULL,ED_NET_LIMIT/2,0,0,1};edWireCell(&measure,(EdCell*)c);if(!measure.ok)return 0;std::vector<unsigned char> bytes(measure.at);EdWire w={bytes.data(),bytes.size(),0,0,1};edWireCell(&w,(EdCell*)c);unsigned int hash=w.ok?edNetHash(bytes.data(),(uint32_t)bytes.size()):0;for(int f=0;f<c->count;f++)if(c->f[f].decalId)hash=(hash^(unsigned int)c->f[f].decalId)*16777619u;return hash;}
+unsigned int edCellHash(const EdCell *c){EdWire measure={NULL,ED_NET_LIMIT/2,0,0,1};edWireCell(&measure,(EdCell*)c);if(!measure.ok)return 0;std::vector<unsigned char> bytes(measure.at);EdWire w={bytes.data(),bytes.size(),0,0,1};edWireCell(&w,(EdCell*)c);unsigned int hash=w.ok?edNetHash(bytes.data(),(uint32_t)bytes.size()):0;for(int f=0;f<c->count;f++){if(c->f[f].decalId)hash=(hash^(unsigned int)c->f[f].decalId)*16777619u;if(c->f[f].bakedLight)for(int v=0;v<c->f[f].count;v++){hash=(hash^edNetHash((const unsigned char*)&c->f[f].v[v].lightRGB,sizeof(EdVec)))*16777619u;hash=(hash^edNetHash((const unsigned char*)&c->f[f].v[v].light,sizeof(double)))*16777619u;}}return hash;}
 
 #include "edGroups.h"
 #include "edSpline.h"
@@ -1318,3 +1465,5 @@ unsigned int edCellHash(const EdCell *c){EdWire measure={NULL,ED_NET_LIMIT/2,0,0
 #include "edTerrainPaint.h"
 
 #include "edDecal.h"
+
+#include "edDestructible.h"

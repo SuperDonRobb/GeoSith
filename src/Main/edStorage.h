@@ -56,6 +56,7 @@ template<class T> class EdScratch {
     std::vector<T> values;
 public:
     T& operator[](size_t i) {if(i>=values.size())values.resize(i+1);return values[i];}
+    T& operator[](int i) {if(i<0)throw std::out_of_range("Negative scratch index");return (*this)[(size_t)i];}
     operator T*() {return values.data();}
 };
 inline int edCompare(const void* a,const void* b,size_t n) {return std::memcmp(a,b,n);}

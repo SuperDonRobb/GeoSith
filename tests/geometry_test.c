@@ -58,6 +58,49 @@ static EdHit meshVertexAt(const EdCell *cell,EdVec point){
     for(int f=0;f<cell->count;f++)for(int v=0;v<cell->f[f].count;v++){EdVec d=edSub(cell->f[f].v[v].p,point);if(edDot(d,d)<ED_EPS*ED_EPS)return EdHit{0,f,v,-1};}return EdHit{-1,-1,-1,-1};
 }
 static void meshTopologyTests(void){
+    {
+        edDefault(m);CHECK(edExtrude(m,0,4,edV(0,1,0)));EdCell distant=m->c[0];
+        for(int f=0;f<distant.count;f++){distant.f[f].neighbor=distant.f[f].mirror=-1;for(int v=0;v<distant.f[f].count;v++)distant.f[f].v[v].p.x+=20;}
+        m->c[m->count++]=distant;CHECK(edValidate(m));EdModel source=*m;
+        auto referenceMode=[](int on){
+#ifdef _WIN32
+            _putenv_s("GEOSITH_MOVE_REFERENCE",on?"1":"");
+#else
+            if(on)setenv("GEOSITH_MOVE_REFERENCE","1",1);else unsetenv("GEOSITH_MOVE_REFERENCE");
+#endif
+        };
+        for(int f=0;f<source.c[0].count;f++)for(int kind=0;kind<3;kind++)for(int axis=0;axis<3;axis++)for(int direction=-1;direction<=1;direction+=2){
+            EdHit hit={0,f,kind==1?0:-1,kind==2?0:-1};EdVec delta=edV(0,0,0);(&delta.x)[axis]=direction*(axis==0?2.0:ED_GRID);
+            referenceMode(1);int slow=edMove(backup,&source,hit,delta);referenceMode(0);int fast=edMove(m,&source,hit,delta);
+            CHECK(fast==slow);if(fast){CHECK(edModelsEqual(m,backup));CHECK(edValidate(m));}
+        }
+    }
+
+    {
+        edDefault(m);edCopyModel(backup,m);CHECK(edValidate(m,backup));
+        m->c[0].f[0].v[0].p.z+=.123;CHECK(!edValidate(m,backup));
+        edCopyModel(m,backup);m->c[0].extraLight=2;CHECK(!edValidate(m,backup));
+    }
+
+    {
+        edDefault(m);m->lightCount=2;m->lights[0].position=edV(0,0,.4);m->lights[0].intensity=.7;m->lights[0].range=5;
+        m->lights[1]=m->lights[0];m->lights[1].position=edV(2,1,.8);
+        std::vector<double> cached;edComputeVertexLights(m,cached);int at=0;
+        for(int s=0;s<m->count;s++)for(int f=0;f<m->c[s].count;f++)for(int v=0;v<m->c[s].f[f].count;v++)CHECK(fabs(cached[at++]-edVertexLight(m,s,f,v))<1e-12);
+    }
+
+    {
+        edDefault(m);m->assetCount=1;strcpy(m->assets[0].name,"dissolve");CHECK(edMeshPrimitive(m,0,0,edV(0,0,.5),0));
+        EdHit face;CHECK(edMeshRay(m,0,edV(0,-1,.5),edV(0,1,0),0,&face));
+        CHECK(edMeshCleave(m,face,edV(0,-.25,.25),edV(0,-.25,.75)));edCopyModel(backup,m);
+        EdHit vertex=meshVertexAt(&m->meshes[0].geometry,edV(0,-.25,.75));CHECK(vertex.cell==0);
+        CHECK(edMeshDissolve(m,vertex));CHECK(m->meshes[0].geometry.count==6);checkClosedMesh(&m->meshes[0].geometry);CHECK(edMeshValidate(m));
+        edCopyModel(m,backup);EdHit edge={-1,-1,-1,-1};
+        for(int f=0;f<m->meshes[0].geometry.count;f++){const EdFace &p=m->meshes[0].geometry.f[f];for(int v=0;v<p.count;v++)if(fabs(p.v[v].p.x)<ED_EPS&&fabs(p.v[(v+1)%p.count].p.x)<ED_EPS&&fabs(p.v[v].p.y+.25)<ED_EPS&&fabs(p.v[(v+1)%p.count].p.y+.25)<ED_EPS)edge=EdHit{0,f,-1,v};}
+        CHECK(edge.cell==0&&edMeshDissolve(m,edge));CHECK(m->meshes[0].geometry.count==6);checkClosedMesh(&m->meshes[0].geometry);
+        EdHit corner=meshVertexAt(&m->meshes[0].geometry,edV(.25,-.25,.75));edCopyModel(backup,m);CHECK(!edMeshDissolve(m,corner)&&edModelsEqual(m,backup));
+    }
+
     for(int sloped=0;sloped<2;sloped++){
         edDefault(m);m->assetCount=1;strcpy(m->assets[0].name,"topology");CHECK(edMeshPrimitive(m,0,0,edV(0,0,.5),0));
         if(sloped)for(int f=0;f<6;f++)for(int v=0;v<4;v++)m->meshes[0].geometry.f[f].v[v].p.y+=.3*m->meshes[0].geometry.f[f].v[v].p.x;
@@ -132,14 +175,15 @@ static void meshTests(void){
     CHECK(edMeshMove(m,backup,&selected,edV(-ED_GRID,0,0)));CHECK(edValidate(m));CHECK(!edCompare(m->c,backup->c,sizeof(m->c)));CHECK(fabs(m->meshes[0].geometry.f[0].v[0].p.x-vertex.x+ED_GRID)<1e-8);
     m->templateCount=1;EdTemplate *t=&m->templates[0];strcpy(t->name,"custom_mesh");strcpy(t->parent,"_decor");t->count=2;strcpy(t->params[0].key,"model3d");strcpy(t->params[0].value,"mesh_test.3do");strcpy(t->params[1].key,"size");strcpy(t->params[1].value,"0.25");CHECK(edTemplatesValidate(m));
     strcpy(t->params[1].value,"0.25 type=actor");CHECK(!edTemplatesValidate(m));strcpy(t->params[1].value,"0.25");strcpy(t->parent,"custom_mesh");CHECK(!edTemplatesValidate(m));strcpy(t->parent,"_decor");
+    m->assets[0].lightBaker=1;
     unsigned char *legacy=edAlloc(ED_NET_LIMIT/2);CHECK(legacy);edCopy(legacy,"G3DO",4);edNetStore32(legacy+4,1);EdWire old={legacy,ED_NET_LIMIT/2,8,0,1};edWireAssetsLegacy(&old,m);edDefault(backup);CHECK(old.ok&&edReadMeshData(backup,legacy,(unsigned int)old.at)&&backup->assets[0].saved==1&&backup->templateCount==0);edFree(legacy);
-    uint32_t size;unsigned char *wire=edWireEncode(m,&size);CHECK(wire&&edWireDecode(backup,wire,size)&&edValidate(backup));CHECK(m->templateCount==backup->templateCount&&!edCompare(m->templates,backup->templates,m->templateCount*sizeof(EdTemplate)));CHECK(m->assets[0].saved==backup->assets[0].saved);CHECK(m->meshCount==backup->meshCount);for(int mi=0;mi<m->meshCount;mi++){CHECK(m->meshes[mi].geometry.count==backup->meshes[mi].geometry.count);for(int fi=0;fi<m->meshes[mi].geometry.count;fi++){const EdFace *x=&m->meshes[mi].geometry.f[fi],*y=&backup->meshes[mi].geometry.f[fi];CHECK(x->count==y->count&&x->material==y->material&&x->uvRotation==y->uvRotation&&!edCompare(x->v,y->v,x->count*sizeof(EdVertex)));}}edFree(wire);
+    uint32_t size;unsigned char *wire=edWireEncode(m,&size);CHECK(wire&&edWireDecode(backup,wire,size)&&edValidate(backup));CHECK(m->templateCount==backup->templateCount&&!edCompare(m->templates,backup->templates,m->templateCount*sizeof(EdTemplate)));CHECK(m->assets[0].saved==backup->assets[0].saved);CHECK(m->assets[0].lightBaker==backup->assets[0].lightBaker);CHECK(m->meshCount==backup->meshCount);for(int mi=0;mi<m->meshCount;mi++){CHECK(m->meshes[mi].geometry.count==backup->meshes[mi].geometry.count);for(int fi=0;fi<m->meshes[mi].geometry.count;fi++){const EdFace *x=&m->meshes[mi].geometry.f[fi],*y=&backup->meshes[mi].geometry.f[fi];CHECK(x->count==y->count&&x->material==y->material&&x->uvRotation==y->uvRotation&&!edCompare(x->v,y->v,x->count*sizeof(EdVertex)));}}edFree(wire);
     const char *resources="SECTION: MATERIALS\nWorld materials 1\n0: dflt.mat 1 1\nend\nSECTION: TEMPLATES\nWorld templates 1\n_decor none type=cog\nend\n";
     CHECK(edWriteGob(m,"test-model-builder.gob","Mesh test",0,resources));FILE *f=fopen("test-model-builder.gob","rb");CHECK(f);fseek(f,0,SEEK_END);long bytes=ftell(f);rewind(f);unsigned char *data=edAlloc(bytes);CHECK(data&&fread(data,1,bytes,f)==bytes);fclose(f);
     uint32_t dir=edNetLoad32(data+8),count=edNetLoad32(data+dir);int models=0,metadata=0;
     for(uint32_t i=0;i<count;i++){unsigned char *entry=data+dir+4+i*136;uint32_t offset=edNetLoad32(entry),size=edNetLoad32(entry+4);CHECK(offset+size<=(uint32_t)bytes);
         if(!strcmp((char*)entry+8,"3do\\mesh_test.3do")){CHECK(!edCompare(data+offset,"SECTION: HEADER",15));models++;}
-        if(!strcmp((char*)entry+8,"misc\\geosith_models.bin")){edDefault(backup);CHECK(edReadMeshData(backup,data+offset,size));CHECK(m->templateCount==backup->templateCount&&!edCompare(m->templates,backup->templates,m->templateCount*sizeof(EdTemplate)));CHECK(m->assets[0].saved==backup->assets[0].saved);CHECK(m->meshCount==backup->meshCount);for(int mi=0;mi<m->meshCount;mi++){CHECK(m->meshes[mi].geometry.count==backup->meshes[mi].geometry.count);for(int fi=0;fi<m->meshes[mi].geometry.count;fi++){const EdFace *x=&m->meshes[mi].geometry.f[fi],*y=&backup->meshes[mi].geometry.f[fi];CHECK(x->count==y->count&&x->material==y->material&&x->uvRotation==y->uvRotation&&!edCompare(x->v,y->v,x->count*sizeof(EdVertex)));}}CHECK(!edReadMeshData(backup,data+offset,size-1));metadata++;}
+        if(!strcmp((char*)entry+8,"misc\\geosith_models.bin")){edDefault(backup);CHECK(edReadMeshData(backup,data+offset,size));CHECK(m->templateCount==backup->templateCount&&!edCompare(m->templates,backup->templates,m->templateCount*sizeof(EdTemplate)));CHECK(m->assets[0].saved==backup->assets[0].saved);CHECK(m->assets[0].lightBaker==backup->assets[0].lightBaker);CHECK(m->meshCount==backup->meshCount);for(int mi=0;mi<m->meshCount;mi++){CHECK(m->meshes[mi].geometry.count==backup->meshes[mi].geometry.count);for(int fi=0;fi<m->meshes[mi].geometry.count;fi++){const EdFace *x=&m->meshes[mi].geometry.f[fi],*y=&backup->meshes[mi].geometry.f[fi];CHECK(x->count==y->count&&x->material==y->material&&x->uvRotation==y->uvRotation&&!edCompare(x->v,y->v,x->count*sizeof(EdVertex)));}}CHECK(!edReadMeshData(backup,data+offset,size-1));metadata++;}
     }CHECK(models==1&&metadata==1);edFree(data);remove("test-model-builder.gob");
     *backup=*m;CHECK(edResolve(m));CHECK(m->assetCount==backup->assetCount&&m->meshCount==backup->meshCount&&m->templateCount==backup->templateCount&&!edCompare(m->templates,backup->templates,sizeof(m->templates)));
     for(int primitive=0;primitive<4;primitive++){
@@ -413,6 +457,21 @@ static void lightTests(void) {
     CHECK(!edReadLights(m,"Section: Lights\nEditor lights 257\nend\n"));CHECK(!edReadLights(m,"Section: Lights\nEditor lights 1\nend\n"));
     CHECK(edReadLights(m,"Section: Lights\r\nEditor lights 1\r\n#num type X Y Z intensity range\r\n0: 0x1 .1 .2 .3 .7 2.5\r\nend\r\n"));CHECK(m->lights[0].type==1&&m->lights[0].intensity==.7);
     CHECK(edReadLights(m,"Section: Lights\nEditor lights 0\nend\n"));CHECK(!m->lightCount);edDefault(m);
+}
+static void bakedLightTests(){
+    edDefault(m);m->lightCount=1;m->lights[0]=EdLight{0,edV(0,0,.5),1,4};m->lights[0].color=edV(1,.25,.125);
+    auto &face=m->c[0].f[0];face.bakedLight=1;for(int v=0;v<face.count;v++){face.v[v].light=.4;face.v[v].lightRGB=edV(.75,.25,.125);}
+    CHECK(edValidate(m)&&edVertexLight(m,0,0,0)==.4);uint32_t size;auto bytes=edWireEncode(m,&size);CHECK(bytes&&edWireDecode(backup,bytes,size)&&edModelsEqual(m,backup)&&edCellsEqual(&m->c[0],&backup->c[0]));
+    CHECK(!edWireDecode(backup,bytes,size-1));edFree(bytes);
+    CHECK(edWriteGob(m,"test-baked.gob","Baked lights",0,"SECTION: HEADER\n"));FILE *f=fopen("test-baked.gob","rb");CHECK(f);fseek(f,0,SEEK_END);long count=ftell(f);rewind(f);std::vector<char> text(count+1);CHECK(fread(text.data(),1,count,f)==count);fclose(f);
+    CHECK(strstr(text.data()+12,"# GeoSith baked light 0 0")&&strstr(text.data()+12,"0.400000000 0.750000000 0.250000000 0.125000000"));edDefault(backup);CHECK(edReadLights(backup,text.data()+12)&&edReadTextureRotations(backup,text.data()+12));CHECK(backup->c[0].f[0].bakedLight&&backup->lights[0].color.y==.25);remove("test-baked.gob");edDefault(m);
+    CHECK(edReadTextureRotations(m,"# GeoSith baked light 95 10\n# GeoSith baked light 0 1\n\n# GeoSith baked light 0 0\n"));
+    CHECK(m->c[0].f[0].bakedLight&&!m->c[0].f[1].bakedLight);
+    CHECK(!edReadTextureRotations(m,"# GeoSith baked light 95 10\n"));
+    CHECK(edWriteGob(m,"test-metadata.gob","Metadata",0,"SECTION: MATERIALS\nWorld materials 0\nend\n# GeoSith baked light 95 10\n# GeoSith light color 99 1 1 1\n"));
+    {FILE *file=fopen("test-metadata.gob","rb");CHECK(file);fseek(file,0,SEEK_END);long n=ftell(file);rewind(file);std::vector<char> data(n+1);CHECK(fread(data.data(),1,n,file)==n);fclose(file);
+    CHECK(!strstr(data.data()+12,"# GeoSith baked light 95 10")&&!strstr(data.data()+12,"# GeoSith light color 99"));CHECK(strstr(data.data()+12,"# GeoSith baked light 0 0"));}
+    remove("test-metadata.gob");edDefault(m);
 }
 static void horizontalExtrusionTests(void) {
     for(int yaw=0;yaw<3;yaw++)for(int slope=-2;slope<=2;slope++)for(int grouped=0;grouped<2;grouped++){
@@ -740,6 +799,13 @@ static void surfacePaintTests(void){
 static void terrainPaintTests(void){
     EdModel source,m,backup,decoded;edDefault(&source);EdSelection selection={};selection.count=1;selection.hits[0]={0,0,-1,-1};
     CHECK(edTerrainCreate(&m,&source,&selection,"paint_test"));backup=m;
+    {
+        EdModel linked=m;linked.assets[0].terrainGroup=1;linked.assets[1]=linked.assets[0];strcpy(linked.assets[1].name,"far_patch");linked.assetCount=2;
+        int meshes=linked.meshCount;for(int i=0;i<meshes;i++){linked.meshes[meshes+i]=linked.meshes[i];linked.meshes[meshes+i].asset=1;for(int f=0;f<linked.meshes[meshes+i].geometry.count;f++)for(int v=0;v<3;v++)linked.meshes[meshes+i].geometry.f[f].v[v].p.x+=10;}linked.meshCount*=2;
+        CHECK(edTerrainPaint(&linked,0,edV(0,0,.002),.75,.5,"green.mat",paintTestName)&&edPainted(&linked,0)&&!edPainted(&linked,1));
+        CHECK(edTerrainPaint(&linked,0,edV(10,0,.002),.75,.5,"green.mat",paintTestName)&&edPainted(&linked,1));
+    }
+
     CHECK(edTerrainPaint(&m,0,edV(0,0,.002),.75,.5,"green.mat",paintTestName));CHECK(edValidate(&m)&&!edModelsEqual(&m,&backup));
     for(int i=0;i<m.meshCount;i++)for(int f=0;f<m.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){
         EdVec p=m.meshes[i].geometry.f[f].v[v].p;double distance=sqrt(p.x*p.x+p.y*p.y)/.75;
@@ -773,12 +839,22 @@ static void terrainPaintTests(void){
     }
     const char *resources="SECTION: MATERIALS\nWorld materials 1\n0: red.mat 1 1\nend\n";
     CHECK(edWriteGob(&m,"test-paint.gob","Paint",0,resources));FILE *file=fopen("test-paint.gob","rb");CHECK(file);fseek(file,0,SEEK_END);long size=ftell(file);rewind(file);std::vector<unsigned char> bytes(size);CHECK(fread(bytes.data(),1,size,file)==size);fclose(file);
+    CHECK(std::string((char*)bytes.data()+12,bytes.size()-12).find("World materials 4096\n")!=std::string::npos);
     unsigned dir=edNetLoad32(bytes.data()+8),entries=edNetLoad32(bytes.data()+dir);bool mat=false,meta=false,model=false;char name[32];edPaintFilename(&m,0,name);
     for(unsigned i=0;i<entries;i++){const unsigned char *entry=bytes.data()+dir+4+i*136;unsigned offset=edNetLoad32(entry),count=edNetLoad32(entry+4);CHECK((size_t)offset+count<=bytes.size());const char *path=(const char*)entry+8;
         if(strstr(path,name)){CHECK(count==bake.mat.size()&&!memcmp(bytes.data()+offset,bake.mat.data(),count));mat=true;}
         if(!strcmp(path,"misc\\geosith_models.bin")){edDefault(&decoded);CHECK(edReadMeshData(&decoded,bytes.data()+offset,count)&&edPaintHash(&decoded,0)==edPaintHash(&m,0)&&!strcmp(decoded.assets[0].paintSlots[1],"blue.mat"));meta=true;}
         if(!strcmp(path,"3do\\paint_test.3do")){std::string text((const char*)bytes.data()+offset,count);CHECK(text.find(name)!=std::string::npos&&text.find("MATERIALS 1")!=std::string::npos);model=true;}
-    }CHECK(mat&&meta&&model);remove("test-paint.gob");edPaintLoadImage=NULL;
+    }CHECK(mat&&meta&&model);remove("test-paint.gob");
+    EdModel cleared=m;CHECK(edTerrainRemovePaint(&cleared,0,0)&&!edPainted(&cleared,0)&&edValidate(&cleared));
+    for(int i=0;i<cleared.meshCount;i++){CHECK(cleared.meshes[i].paint.size()==0);for(int f=0;f<cleared.meshes[i].geometry.count;f++){
+        const EdFace &face=cleared.meshes[i].geometry.f[f];CHECK(face.material==0&&face.customUV&&face.decalId==0);
+        for(int v=0;v<face.count;v++){CHECK(!memcmp(&face.v[v].p,&m.meshes[i].geometry.f[f].v[v].p,sizeof(EdVec)));CHECK(fabs(face.v[v].u-backup.meshes[i].geometry.f[f].v[v].u)<1e-8&&fabs(face.v[v].v-backup.meshes[i].geometry.f[f].v[v].v)<1e-8);}
+    }}
+    wire=edWireEncode(&cleared,&n);CHECK(wire&&edWireDecode(&decoded,wire,n)&&edModelsEqual(&decoded,&cleared));edFree(wire);
+    CHECK(edWriteGob(&cleared,"test-paint-cleared.gob","Cleared",0,resources));file=fopen("test-paint-cleared.gob","rb");CHECK(file);fseek(file,0,SEEK_END);size=ftell(file);rewind(file);bytes.resize(size);CHECK(fread(bytes.data(),1,size,file)==size);fclose(file);
+    dir=edNetLoad32(bytes.data()+8);entries=edNetLoad32(bytes.data()+dir);for(unsigned i=0;i<entries;i++){const char *path=(const char*)bytes.data()+dir+4+i*136+8;CHECK(!strstr(path,name));}
+    remove("test-paint-cleared.gob");edPaintLoadImage=NULL;
 }
 static void textureStitchTests(void){
     EdFace source={},target={};source.count=target.count=4;source.material=2;target.material=7;
@@ -804,10 +880,32 @@ static void terrainGrowthTests(void){
     puts("PASS: 24 terrain assets, growing meshes, network roundtrip and bounded malformed metadata");
 }
 static void terrainTests(void){
+    auto reference=[](int enabled){
+#ifdef _WIN32
+        _putenv_s("GEOSITH_TERRAIN_REFERENCE",enabled?"1":"");
+#else
+        if(enabled)setenv("GEOSITH_TERRAIN_REFERENCE","1",1);else unsetenv("GEOSITH_TERRAIN_REFERENCE");
+#endif
+    };
+
     EdModel source,terrain,before,decoded;edDefault(&source);EdSelection surfaces={};surfaces.count=1;surfaces.hits[0]={0,0,-1,-1};
     CHECK(edTerrainCreate(&terrain,&source,&surfaces,"terrain_test")&&edValidate(&terrain));CHECK(terrain.assetCount==1&&terrain.assets[0].terrain&&terrain.assets[0].terrainNormal.z>.999);
+    for(int mode=0;mode<3;mode++)for(double radius:{.2,.5,2.0}){
+        EdModel fast=terrain,slow=terrain;EdVec center=edV(.1,.2,.001);
+        reference(1);int a=mode==0?edTerrainSculpt(&slow,0,center,radius,.02):mode==1?edTerrainSmooth(&slow,0,center,radius,.1):edTerrainGrab(&slow,&terrain,0,center,radius,edV(.01,0,.02));
+        reference(0);int b=mode==0?edTerrainSculpt(&fast,0,center,radius,.02):mode==1?edTerrainSmooth(&fast,0,center,radius,.1):edTerrainGrab(&fast,&terrain,0,center,radius,edV(.01,0,.02));
+        CHECK(a==b&&edModelsEqual(&fast,&slow));
+    }
+
     int triangles=0,pinned=0,free=0;double area=0;for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++){const EdFace &face=terrain.meshes[i].geometry.f[f];CHECK(face.count==3);triangles++;EdVec cross=edCross(edSub(face.v[1].p,face.v[0].p),edSub(face.v[2].p,face.v[0].p));area+=sqrt(edDot(cross,cross))*.5;for(int v=0;v<3;v++)if(terrain.meshes[i].terrainPinned[f*3+v])pinned++;else free++;}
     CHECK(triangles==128&&free&&fabs(area-4)<1e-8);before=terrain;
+    // A large terrain automatically spans meshes below BOTH stock limits.
+    {EdModel large=source,split;for(int f=0;f<large.c[0].count;f++)for(int v=0;v<large.c[0].f[f].count;v++){large.c[0].f[f].v[v].p.x*=4;large.c[0].f[f].v[v].p.y*=4;}
+     CHECK(edTerrainCreate(&split,&large,&surfaces,"split_terrain")&&split.meshCount>1);int total=0;
+     for(int i=0;i<split.meshCount;i++){int vertices=0,triangles=0;for(int f=0;f<split.meshes[i].geometry.count;f++){vertices+=split.meshes[i].geometry.f[f].count;triangles+=split.meshes[i].geometry.f[f].count-2;}CHECK(vertices<=512&&triangles<=500);total+=triangles;}
+     CHECK(total>500);
+    }
+
     CHECK(!edTerrainSmooth(&terrain,0,edV(0,0,0),.75,.5)&&edModelsEqual(&terrain,&before));
     CHECK(edTerrainSculpt(&terrain,0,edV(0,0,.002),.75,.2)&&edValidate(&terrain));double maxHeight=0;
     for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){const EdVertex &vertex=terrain.meshes[i].geometry.f[f].v[v];maxHeight=fmax(maxHeight,vertex.p.z);if(terrain.meshes[i].terrainPinned[f*3+v])CHECK(vertex.p.z==0);CHECK(isfinite(vertex.u)&&isfinite(vertex.v));}
@@ -817,10 +915,13 @@ static void terrainTests(void){
     // must sculpt even when their old boundary marker is set.
     CHECK(edTerrainSculpt(&terrain,0,edV(1,0,.002),.5,.2,edV(0,0,1)));int movedEdge=0;
     for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++)for(int v=0;v<3;v++){EdVec p=terrain.meshes[i].geometry.f[f].v[v].p;if(fabs(p.x-1)<1e-8&&fabs(p.y)<1e-8){CHECK(fabs(p.z-.202)<1e-8);movedEdge++;}}CHECK(movedEdge>0);
+    // Baked terrain light survives network/undo, editable metadata, and standard 3DO output.
+    for(int i=0;i<terrain.meshCount;i++)for(int f=0;f<terrain.meshes[i].geometry.count;f++){auto &face=terrain.meshes[i].geometry.f[f];face.bakedLight=1;for(int v=0;v<3;v++){face.v[v].light=.375;face.v[v].lightRGB=edV(.25,.5,.125);}}
+    unsigned hash=edCellHash(&terrain.meshes[0].geometry);terrain.meshes[0].geometry.f[0].v[0].light=.5;CHECK(hash!=edCellHash(&terrain.meshes[0].geometry));terrain.meshes[0].geometry.f[0].v[0].light=.375;
     uint32_t size;unsigned char *wire=edWireEncode(&terrain,&size);CHECK(wire&&edWireDecode(&decoded,wire,size)&&edModelsEqual(&terrain,&decoded));edFree(wire);
     const char *resources="SECTION: MATERIALS\nWorld materials 1\n0: dflt.mat 1 1\nend\n";
     CHECK(edWriteGob(&terrain,"test-terrain.gob","Terrain",0,resources));FILE *file=fopen("test-terrain.gob","rb");CHECK(file);fseek(file,0,SEEK_END);long bytes=ftell(file);rewind(file);unsigned char *data=edAlloc(bytes);CHECK(data&&fread(data,1,bytes,file)==bytes);fclose(file);uint32_t dir=edNetLoad32(data+8),count=edNetLoad32(data+dir);int meshFound=0,metaFound=0;
-    for(uint32_t i=0;i<count;i++){unsigned char *entry=data+dir+4+i*136;uint32_t offset=edNetLoad32(entry),n=edNetLoad32(entry+4);CHECK(offset+n<=bytes);if(!strcmp((char*)entry+8,"3do\\terrain_test.3do"))meshFound=1;if(!strcmp((char*)entry+8,"misc\\geosith_models.bin")){edDefault(&decoded);CHECK(edReadMeshData(&decoded,data+offset,n)&&decoded.assets[0].terrain&&decoded.assets[0].terrainNormal.z>.999&&decoded.meshes[0].terrainPinned.size()==terrain.meshes[0].terrainPinned.size());metaFound=1;}}
+    for(uint32_t i=0;i<count;i++){unsigned char *entry=data+dir+4+i*136;uint32_t offset=edNetLoad32(entry),n=edNetLoad32(entry+4);CHECK(offset+n<=bytes);if(!strcmp((char*)entry+8,"3do\\terrain_test.3do")){std::string text((char*)data+offset,n);CHECK(text.find("0.375000000\n")!=std::string::npos);meshFound=1;}if(!strcmp((char*)entry+8,"misc\\geosith_models.bin")){edDefault(&decoded);CHECK(edReadMeshData(&decoded,data+offset,n)&&decoded.assets[0].terrain&&decoded.assets[0].terrainNormal.z>.999&&decoded.meshes[0].terrainPinned.size()==terrain.meshes[0].terrainPinned.size());CHECK(decoded.meshes[0].geometry.f[0].bakedLight&&decoded.meshes[0].geometry.f[0].v[0].light==.375&&decoded.meshes[0].geometry.f[0].v[0].lightRGB.y==.5);metaFound=1;}}
     CHECK(meshFound&&metaFound);edFree(data);remove("test-terrain.gob");
     // Multiple coplanar surfaces share unpinned interior seams.
     CHECK(edCleave(&source,0,0,edV(0,-1,0),edV(0,1,0)));surfaces.count=0;for(int f=0;f<source.c[0].count;f++)if(edNormal(&source.c[0].f[f]).z>.99)surfaces.hits[surfaces.count++]={0,f,-1,-1};CHECK(surfaces.count==2&&edTerrainCreate(&terrain,&source,&surfaces,"joined"));
@@ -921,6 +1022,19 @@ static void splineTests(void){
     EdModel original,out;edDefault(&original);EdSpline spline={};spline.id=1;spline.count=3;spline.sides=4;spline.segments=8;spline.width=1;spline.height=1;
     spline.points[0]={edV(4,0,.5),edV(0,1,0)};spline.points[1]={edV(4,3,.5),edV(1,1,0)};spline.points[2]={edV(7,4,.5),edV(1,0,0)};
     if(!edSplineRebuild(&out,&original,&spline)||!edValidate(&out)||out.splineCount!=1||out.count!=9){fprintf(stderr,"Spline generation failed\n");{fprintf(stderr,"Spline test line %d\n",__LINE__);exit(2);}}
+    {
+        auto flagsModel=std::make_unique<EdModel>();EdSpline flagged=out.splines[0];flagged.sectorFlags=3;flagged.sectorFlagsMask=3;flagged.hasSectorTint=1;flagged.sectorTint=edV(.1,.2,.3);
+        CHECK(edSplineUpdate(flagsModel.get(),&out,&flagged)&&!flagsModel->splines[0].invalid);
+        for(int c=0;c<flagsModel->count;c++)CHECK((flagsModel->c[c].flags&3)==(flagsModel->c[c].splineId?3:0));
+        flagged=flagsModel->splines[0];flagged.segments=6;flagged.sectorFlags=2;flagged.mirrorAxes=1;
+        auto rebuilt=std::make_unique<EdModel>();CHECK(edSplineUpdate(rebuilt.get(),flagsModel.get(),&flagged)&&!rebuilt->splines[0].invalid);
+        for(int c=0;c<rebuilt->count;c++)if(rebuilt->c[c].splineId)CHECK((rebuilt->c[c].flags&3)==2&&fabs(rebuilt->c[c].tint.y-.2)<1e-9);
+        unsigned size=0;unsigned char *wire=edWireEncode(rebuilt.get(),&size);CHECK(wire&&edWireDecode(flagsModel.get(),wire,size)&&edModelsEqual(flagsModel.get(),rebuilt.get()));edFree(wire);
+        CHECK(edWriteGob(rebuilt.get(),"test-spline-flags.gob","Spline flags",0,"SECTION: HEADER\n"));
+        FILE *f=fopen("test-spline-flags.gob","rb");CHECK(f);fseek(f,0,SEEK_END);long sizeGob=ftell(f);rewind(f);std::vector<char> text(sizeGob+1);CHECK(fread(text.data(),1,sizeGob,f)==sizeGob);fclose(f);
+        flagsModel->splines[0].hasSectorTint=0;flagsModel->splines[0].sectorTint={};flagsModel->splines[0].sectorFlags=flagsModel->splines[0].sectorFlagsMask=0;edSplineReadMetadata(flagsModel.get(),text.data()+12);CHECK(edModelsEqual(flagsModel.get(),rebuilt.get()));remove("test-spline-flags.gob");
+        CHECK(edSplineConvert(flagsModel.get(),1));for(int c=1;c<flagsModel->count;c++)CHECK((flagsModel->c[c].flags&3)==2);
+    }
     for(int i=1;i<out.count;i++){int adjoins=0;for(int f=0;f<out.c[i].count;f++)adjoins+=out.c[i].f[f].neighbor>=0;if(!adjoins){fprintf(stderr,"Spline test line %d\n",__LINE__);exit(2);}}
     int wrapped=0;double minV=1e30,maxV=-1e30;
     for(int c=1;c<out.count;c++)for(int f=0;f<out.c[c].count;f++)if(out.c[c].f[f].customUV){wrapped++;for(int v=0;v<out.c[c].f[f].count;v++){minV=fmin(minV,out.c[c].f[f].v[v].v);maxV=fmax(maxV,out.c[c].f[f].v[v].v);}}
@@ -1018,6 +1132,45 @@ static void splineTests(void){
     decoded=joined;decoded.splines.clear();edSplineReadMetadata(&decoded,text+12);edFree(text);remove("test-spline-cuts.gob");CHECK(edModelsEqual(&decoded,&joined));CHECK(edSplineUpdate(&away,&decoded,&shifted)&&away.c[0].count==original.c[0].count);
     puts("PASS: spline corridors, connected convex sectors, elevation, shape regeneration, wire data and explicit conversion");
 }
+static void splineWalkstructTests(void){
+    EdModel source,result,decoded,changed;edDefault(&source);CHECK(edResolve(&source));
+    EdSpline settings={};settings.id=1;settings.count=2;settings.sides=4;settings.segments=4;settings.width=settings.height=.5;settings.makeWalkstruct=1;
+    settings.points[0]={edV(0,-.5,.5),edV(0,.25,0)};settings.points[1]={edV(0,.5,.5),edV(0,.25,0)};
+    CHECK(edSplineUpdate(&result,&source,&settings)&&!result.splines[0].invalid&&edValidate(&result));
+    CHECK(result.count==source.count&&edCellsEqual(&result.c[0],&source.c[0]));
+    CHECK(result.assetCount==1&&result.templateCount==1&&result.objectCount==source.objectCount+1&&result.meshCount==1);
+    CHECK(!strcmp(result.templates[0].parent,"_walkstruct")&&result.assets[0].saved);
+    int faces=0;for(int m=0;m<result.meshCount;m++)for(int f=0;f<result.meshes[m].geometry.count;f++){
+        const EdFace &face=result.meshes[m].geometry.f[f];EdVec center={};for(int v=0;v<face.count;v++)center=edAdd(center,face.v[v].p);center=edScale(center,1.0/face.count);
+        CHECK(edDot(edNormal(&face),edSub(center,edV(0,0,.5)))>0);faces++;
+    }CHECK(faces==18); // Four walls per span, only two exterior end caps.
+    unsigned size;unsigned char *wire=edWireEncode(&result,&size);CHECK(wire&&edWireDecode(&decoded,wire,size)&&edModelsEqual(&decoded,&result));edFree(wire);
+    CHECK(edWriteGob(&result,"test-spline-model.gob","Spline model",0,"SECTION: MATERIALS\nWorld materials 1\n0: dflt.mat 1 1\nend\nSECTION: TEMPLATES\nWorld templates 1\n_walkstruct none type=cog collide=3\nend\n"));
+    FILE *file=fopen("test-spline-model.gob","rb");CHECK(file);fseek(file,0,SEEK_END);long bytes=ftell(file);rewind(file);std::vector<char> text(bytes+1);CHECK(fread(text.data(),1,bytes,file)==bytes);fclose(file);
+    decoded.splines.clear();edSplineReadMetadata(&decoded,text.data()+12);CHECK(edModelsEqual(&decoded,&result));remove("test-spline-model.gob");
+    settings=result.splines[0];settings.points[1].position.x+=.125;
+    CHECK(edSplineUpdate(&changed,&result,&settings)&&!changed.splines[0].invalid&&changed.assetCount==1&&changed.objectCount==result.objectCount);
+    settings=changed.splines[0];settings.makeWalkstruct=0;CHECK(edSplineUpdate(&decoded,&changed,&settings)&&!decoded.splines[0].invalid&&decoded.assetCount==0&&decoded.meshCount==0&&decoded.templateCount==0&&decoded.objectCount==source.objectCount);
+    decoded=result;CHECK(edSplineConvert(&decoded,1)&&!decoded.splineCount&&!decoded.assetCount&&!decoded.meshCount);
+    settings=result.splines[0];settings.count=1;CHECK(edSplineUpdate(&decoded,&result,&settings)&&!decoded.assetCount&&!decoded.meshCount&&decoded.objectCount==source.objectCount);
+    settings=result.splines[0];settings.sides=32;settings.segments=20;
+    CHECK(edSplineUpdate(&changed,&result,&settings)&&!changed.splines[0].invalid&&changed.meshCount>1);
+    int total=0;for(int m=0;m<changed.meshCount;m++){int tris=0,verts=0;for(int f=0;f<changed.meshes[m].geometry.count;f++){int n=changed.meshes[m].geometry.f[f].count;tris+=n-2;verts+=n;}CHECK(tris<=500&&verts<=512);total+=tris;}CHECK(total>500);
+    {
+        EdModel rooms;edDefault(&rooms);rooms.count=3;for(int c=1;c<3;c++){rooms.c[c]=rooms.c[0];for(int f=0;f<rooms.c[c].count;f++)for(int v=0;v<rooms.c[c].f[f].count;v++)rooms.c[c].f[f].v[v].p.y+=c==1?-2:2;}CHECK(edResolve(&rooms));
+        EdSpline span=result.splines[0];span.points[0].position.y=-2.8;span.points[1].position.y=2.8;span.segments=12;
+        EdModel partitioned;CHECK(edSplineUpdate(&partitioned,&rooms,&span)&&!partitioned.splines[0].invalid&&partitioned.assetCount==3&&partitioned.count==3);
+        auto local=[](const EdModel &m){for(int a=0;a<m.assetCount;a++){int cell=-1;for(int c=0;c<m.count;c++)if(edContains(&m.c[c],m.assets[a].origin)){cell=c;break;}CHECK(cell>=0);for(int mesh=0;mesh<m.meshCount;mesh++)if(m.meshes[mesh].asset==a)for(int f=0;f<m.meshes[mesh].geometry.count;f++)for(int v=0;v<m.meshes[mesh].geometry.f[f].count;v++)CHECK(edContains(&m.c[cell],m.meshes[mesh].geometry.f[f].v[v].p));}};
+        local(partitioned);CHECK(edSplineRepairWalkstructs(&partitioned)==0);
+        EdModel big=source;for(int f=0;f<big.c[0].count;f++)for(int v=0;v<big.c[0].f[f].count;v++)big.c[0].f[f].v[v].p.y*=3;
+        EdModel legacy;CHECK(edSplineUpdate(&legacy,&big,&span)&&legacy.assetCount==1);legacy.count=rooms.count;legacy.c=rooms.c;
+        CHECK(edSplineRepairWalkstructs(&legacy)==1&&legacy.assetCount==3&&edValidate(&legacy));local(legacy);
+        span=partitioned.splines[0];span.points[1].position.y=2.6;CHECK(edSplineUpdate(&decoded,&partitioned,&span)&&decoded.assetCount==3&&decoded.objectCount==partitioned.objectCount);local(decoded);
+        span=decoded.splines[0];span.count=1;CHECK(edSplineUpdate(&partitioned,&decoded,&span)&&!partitioned.assetCount&&!partitioned.templateCount&&!partitioned.meshCount&&partitioned.objectCount==rooms.objectCount);
+        puts("PASS: cross-sector spline pieces, legacy repair, local collision ownership, regeneration and cleanup");
+    }
+    CHECK(edValidate(&changed));puts("PASS: editable spline walkstructs, exterior normals, mesh limits, regeneration, mode switch, conversion, removal and persistence");
+}
 static void arrayTests(void){
     // A straight spline must retain coplanar face partitions, not replace
     // their combined outline with a hull face belonging to no source patch.
@@ -1054,6 +1207,13 @@ static void arrayTests(void){
     puts("PASS: six array directions, multi-sector groups, regeneration, bent textured spline groups, wire and saved metadata");
 }
 int main(int argc,char **argv) {
+    if(argc==3&&!strcmp(argv[1],"--spline-isolated")){
+        FILE *f=fopen(argv[2],"rb");CHECK(f);fseek(f,0,SEEK_END);long n=ftell(f);rewind(f);std::vector<unsigned char> bytes(n);CHECK(fread(bytes.data(),1,n,f)==n);fclose(f);
+        auto loadedStorage=std::make_unique<EdModel>(),sourceStorage=std::make_unique<EdModel>(),resultStorage=std::make_unique<EdModel>();EdModel &loaded=*loadedStorage,&source=*sourceStorage,&result=*resultStorage;CHECK(edWireDecode(&loaded,bytes.data(),(uint32_t)n));edDefault(&source);source.groups=loaded.groups;source.groupCount=loaded.groupCount;
+        for(int i=0;i<loaded.splineCount;i++)if(loaded.splines[i].groupId){EdSpline s=loaded.splines[i];s.cutBefore.clear();s.cutAfter.clear();s.preview.clear();for(int p=0;p<s.count;p++)s.points[p].position.x+=100;fprintf(stderr,"Testing group %s\n",source.groups[s.groupId-1].name);CHECK(edSplineRebuild(&result,&source,&s)&&edValidate(&result));}
+        if(const char *path=getenv("GEOSITH_GROUP_REGRESSION_DUMP")){source.splineCount=0;for(int i=0;i<loaded.splineCount;i++)if(loaded.splines[i].groupId){EdSpline s=loaded.splines[i];s.cutBefore.clear();s.cutAfter.clear();s.preview.clear();s.invalid=0;source.splines[source.splineCount++]=s;}unsigned size;unsigned char *wire=edWireEncode(&source,&size);FILE *out=fopen(path,"wb");CHECK(out&&wire&&fwrite(wire,1,size,out)==size);fclose(out);edFree(wire);}
+        puts("PASS: saved group spline generates closed convex geometry");return 0;
+    }
     if(argc==3&&!strcmp(argv[1],"--spline-world")){
         FILE *f=fopen(argv[2],"rb");CHECK(f);fseek(f,0,SEEK_END);long n=ftell(f);rewind(f);std::vector<unsigned char> bytes(n);CHECK(fread(bytes.data(),1,n,f)==n);fclose(f);auto sourceStorage=std::make_unique<EdModel>(),resultStorage=std::make_unique<EdModel>();EdModel &source=*sourceStorage,&result=*resultStorage;CHECK(edWireDecode(&source,bytes.data(),(uint32_t)n));for(int i=0;i<source.splineCount;i++){CHECK(edSplineUpdate(&result,&source,&source.splines[i])&&!result.splines[i].invalid&&edValidate(&result));}puts("PASS: saved world spline rebuild");return 0;
     }
@@ -1094,6 +1254,7 @@ int main(int argc,char **argv) {
     surfacePaintTests();
     terrainPaintTests();
     splineTests();
+    splineWalkstructTests();
     setvbuf(stdout,NULL,_IONBF,0);
     EdDoubleTap tap;edResetDoubleTap(&tap,0);
     CHECK(!edDoubleTap(&tap,1,100,350));CHECK(!edDoubleTap(&tap,1,110,350));
@@ -1112,7 +1273,7 @@ int main(int argc,char **argv) {
     savedMapVertexTests();
     mergeSectorTests();
     meshTests();
-    wireTests();walkingDragTests();placedFixtureTests();placedSectorEditTests();weldCoverageTests();singleDoorCutTests();ceilingMoveTests();surfaceAttributeTests();stairsTests();horizontalExtrusionTests();lightTests();episodeTests();cogTests();cleanupTests();deleteHandleTests();mapCleaveDeleteTests();
+    wireTests();walkingDragTests();placedFixtureTests();placedSectorEditTests();weldCoverageTests();singleDoorCutTests();ceilingMoveTests();surfaceAttributeTests();stairsTests();horizontalExtrusionTests();lightTests();bakedLightTests();episodeTests();cogTests();cleanupTests();deleteHandleTests();mapCleaveDeleteTests();
     /* Top-down hit testing includes overlapping floors; selection rectangles
        intersect actual projected polygons rather than sector bounding boxes. */
     edDefault(m);CHECK(edMapSectorPoint(&m->c[0],0,0));CHECK(!edMapSectorPoint(&m->c[0],2,0));
@@ -1351,6 +1512,15 @@ int main(int argc,char **argv) {
         for(int face=6;face<m->c[0].count;face++){CHECK(m->c[0].f[face].material==7);CHECK(fabs(edSurfaceAttributes(&m->c[0].f[face]).extraLight-.25)<1e-6);}
         *backup=*m;CHECK(!edCleaveShape(m,0,4,edV(0,1,.5),10,sides));CHECK(!edCompare(m,backup,sizeof(*m)));
     }
+    for(int sides: {3,4,5,8,16,24}){
+        edDefault(m);double volume=totalVolume(m);CHECK(edCleaveSectorShape(m,0,4,edV(0,1,.5),.25,sides,17));
+        CHECK(m->count==sides+1&&edValidate(m)&&portals()>=sides*2);CHECK(fabs(totalVolume(m)-volume)<1e-6);
+        int front=0;for(int f=0;f<m->c[0].count;f++){const EdFace &face=m->c[0].f[f];int onWall=1;for(int v=0;v<face.count;v++)onWall&=fabs(face.v[v].p.y-1)<ED_EPS;if(onWall){CHECK(face.count==sides);front++;}}CHECK(front==1);
+        for(int c=0;c<m->count;c++)for(int f=0;f<m->c[c].count;f++){const EdFace &face=m->c[c].f[f];if(face.neighbor>=0){CHECK(face.mirror>=0);const EdFace &other=m->c[face.neighbor].f[face.mirror];CHECK(other.neighbor==c&&other.mirror==f);}}
+        unsigned bytes=0;unsigned char *wire=edWireEncode(m,&bytes);CHECK(wire&&edWireDecode(backup,wire,bytes)&&edModelsEqual(m,backup));edFree(wire);
+    }
+    edDefault(m);double shapeVolume=totalVolume(m);CHECK(edCleaveSectorShape(m,0,4,edV(0,1,0),.25,32,0));CHECK(edValidate(m)&&m->count>1&&fabs(totalVolume(m)-shapeVolume)<1e-6);
+    edDefault(m);edCopyModel(backup,m);edClearGeometryError();CHECK(!edCleaveSectorShape(m,0,4,edV(0,1,.5),.25,32,0)&&edVertexLimitHit()&&edModelsEqual(m,backup));edClearGeometryError();
     edDefault(m);CHECK(edCleaveShape(m,0,0,edV(0,0,0),.25,24));CHECK(edValidate(m));
     for(int sides=3;sides<=ED_SURFACE_VERTS;sides++){
         edDefault(m);EdVec preview[32],unrotated[32];CHECK(edShapePoints(&m->c[0].f[4],edV(0,1,.5),.25,sides,17,preview));CHECK(edShapePoints(&m->c[0].f[4],edV(0,1,.5),.25,sides,0,unrotated));
@@ -1393,9 +1563,109 @@ int main(int argc,char **argv) {
     char *payload=gob+12;CHECK(strstr(payload,"Custom header title"));CHECK(strstr(payload,"World Gravity 3.5\n"));CHECK(strstr(payload,"0: 01narsh.cmp"));CHECK(strstr(payload,"\"SITHED_TEXT_19\" 0 \"Last intro line\""));edFree(gob);remove("test-level.gob");
     strcpy(m->header.intro[0],"Invalid \"quote\"");CHECK(!edWriteGob(m,"test-level.gob","test",0,""));edDefault(m);
 }
+    {
+        auto wall=std::make_unique<EdModel>();edDefault(wall.get());EdBuffer<unsigned char> sectors;sectors[0]=1;
+        auto before=std::make_unique<EdModel>(*wall);
+        CHECK(edGenerateDestructible(wall.get(),sectors,"test_wall"));
+        CHECK(edValidate(wall.get())&&wall->assetCount==13&&wall->templateCount==14&&wall->objectCount==1&&wall->cogCount==1);
+        CHECK(wall->count==before->count&&edCellsEqual(&wall->c[0],&before->c[0]));
+        CHECK(wall->cogs[0].count==99&&atoi(wall->cogs[0].params[1].value)==12);
+        for(int t=2;t<wall->templateCount;t++){int timer=0;for(int p=0;p<wall->templates[t].count;p++)if(!strcmp(wall->templates[t].params[p].key,"timer")){CHECK(!strcmp(wall->templates[t].params[p].value,"4"));timer++;}CHECK(timer==1);}
+        double sum=0;for(int i=1;i<wall->meshCount;i++){const EdCell &cell=wall->meshes[i].geometry;double v=0;for(int f=0;f<cell.count;f++)for(int j=1;j+1<cell.f[f].count;j++)v+=edDot(cell.f[f].v[0].p,edCross(cell.f[f].v[j].p,cell.f[f].v[j+1].p))/6;sum+=fabs(v);}
+        double expected=0;const EdCell &cell=before->c[0];for(int f=0;f<cell.count;f++)for(int j=1;j+1<cell.f[f].count;j++)expected+=edDot(cell.f[f].v[0].p,edCross(cell.f[f].v[j].p,cell.f[f].v[j+1].p))/6;
+        CHECK(fabs(sum-fabs(expected))<1e-6);
+        unsigned bytes=0;unsigned char *encoded=edWireEncode(wall.get(),&bytes);CHECK(encoded&&edWireDecode(before.get(),encoded,bytes)&&edModelsEqual(before.get(),wall.get()));edFree(encoded);
+        CHECK(!edGenerateDestructible(wall.get(),sectors,"test_wall")&&edModelsEqual(before.get(),wall.get()));
+        edDefault(before.get());CHECK(edExtrudeStep(before.get(),0,4));sectors[1]=1;
+        CHECK(edGenerateDestructible(before.get(),sectors,"two_sectors")&&edValidate(before.get()));
+        CHECK(before->meshes[0].geometry.count==5&&before->meshes[1].geometry.count==5);
+        for(int c=0;c<before->count;c++)for(int f=0;f<before->c[c].count;f++)if(before->c[c].f[f].neighbor>=0){EdSurfaceAttributes a=edSurfaceAttributes(&before->c[c].f[f]);CHECK(a.geometryMode==0&&(a.adjoinFlags&2)&&!(a.surfaceFlags&4));}
+
+    }
+    {
+        // Broad phase must preserve exact results for overlap, contact, tiny
+        // gaps and disconnected cells; it must not skip partial portals.
+        for(double offset:{0.0,1.5,2.0,2.0+ED_EPS*.5,2.0+ED_IMPORT_EPS*8,20.0}){
+            auto slow=std::make_unique<EdModel>();edDefault(slow.get());slow->count=3;slow->c[1]=slow->c[2]=slow->c[0];
+            for(int c=1;c<3;c++)for(int f=0;f<slow->c[c].count;f++)for(int v=0;v<slow->c[c].f[f].count;v++)slow->c[c].f[f].v[v].p=edAdd(slow->c[c].f[f].v[v].p,edV(c==1?offset:40,c==1?.5:0,0));
+            auto fast=std::make_unique<EdModel>(*slow);int a=edResolve(slow.get(),0),b=edResolve(fast.get());CHECK(a==b&&a&&edModelsEqual(slow.get(),fast.get())&&edValidate(fast.get()));
+        }
+    }
+    {
+        auto portal=std::make_unique<EdModel>();edDefault(portal.get());CHECK(edExtrudeStep(portal.get(),0,4));
+        int neighbor=portal->c[0].f[4].neighbor,mirror=portal->c[0].f[4].mirror;
+        CHECK(neighbor>=0&&mirror>=0);int firstCount=portal->c[0].count,secondCount=portal->c[neighbor].count;
+        EdFace &back=portal->c[neighbor].f[mirror];back.attributes=edSurfaceAttributes(&back);back.hasAttributes=1;back.attributes.extraLight=.375;back.uOffset=17;edMapFace(&back);
+        auto unchanged=std::make_unique<EdModel>(*portal);
+        CHECK(!edCleaveFacePlane(portal.get(),0,4,edV(0,1,0),edV(0,1,0))&&edModelsEqual(portal.get(),unchanged.get()));
+        CHECK(edCleave(portal.get(),0,4,edV(0,1,0),edV(0,1,1))&&edValidate(portal.get()));
+        CHECK(portal->count==2&&portal->c[0].count==firstCount+1&&portal->c[neighbor].count==secondCount+1);
+        for(int f:{4,firstCount}){
+            const EdFace &front=portal->c[0].f[f],&paired=portal->c[front.neighbor].f[front.mirror];
+            CHECK(front.neighbor==neighbor&&paired.neighbor==0&&paired.mirror==f&&front.count==paired.count);
+            CHECK(paired.attributes.extraLight==.375&&paired.uOffset==17);
+            for(int v=0;v<front.count;v++){int match=0;for(int w=0;w<paired.count;w++){EdVec d=edSub(front.v[v].p,paired.v[w].p);match|=edDot(d,d)<1e-12;}CHECK(match);}
+        }
+        unsigned bytes=0;unsigned char *wire=edWireEncode(portal.get(),&bytes);CHECK(wire&&edWireDecode(unchanged.get(),wire,bytes)&&edModelsEqual(portal.get(),unchanged.get()));edFree(wire);
+        CHECK(edCleaveFacePlane(portal.get(),neighbor,mirror,edV(0,0,1),edV(0,0,.5))&&edValidate(portal.get()));
+        auto shaped=std::make_unique<EdModel>();edDefault(shaped.get());CHECK(edExtrudeStep(shaped.get(),0,4));
+        CHECK(edCleaveShape(shaped.get(),0,4,edV(0,1,.5),.25,4)&&edValidate(shaped.get()));
+        for(int c=0;c<shaped->count;c++)for(int f=0;f<shaped->c[c].count;f++){const EdFace &p=shaped->c[c].f[f];if(p.neighbor<0)continue;const EdFace &other=shaped->c[p.neighbor].f[p.mirror];CHECK(other.neighbor==c&&other.mirror==f);}
+        *unchanged=*portal;portal->c[0].splineId=1;auto protectedPortal=std::make_unique<EdModel>(*portal);
+        CHECK(!edCleaveFacePlane(portal.get(),neighbor,mirror,edV(0,0,1),edV(0,0,.25))&&edModelsEqual(portal.get(),protectedPortal.get()));
+    }
+    {
+        auto lift=std::make_unique<EdModel>();edDefault(lift.get());
+        EdPlacedCog script={};CHECK(edCogParseScript(&script,"12_trooperelev.cog","symbols\nthing elevator linkid=1\nsector topSector linkid=2\nfloat speed=2.0\nfloat startPause=0.25\nfloat sleepTime=2.0\nend\ncode\nend\n"));
+        auto before=std::make_unique<EdModel>(*lift);CHECK(!edGenerateLift(lift.get(),0,"test_lift",script)&&edModelsEqual(lift.get(),before.get()));
+        CHECK(edExtrudeStep(lift.get(),0,1));for(int f=0;f<lift->c[1].count;f++)for(int v=0;v<lift->c[1].f[f].count;v++)if(lift->c[1].f[f].v[v].p.z>1)lift->c[1].f[f].v[v].p.z+=.5;*before=*lift;
+        auto topLift=std::make_unique<EdModel>(*lift);
+        CHECK(edGenerateLift(topLift.get(),1,"test_top",script,1)&&edValidate(topLift.get()));
+        CHECK(edGenerateLift(lift.get(),1,"test_lift",script)&&edValidate(lift.get()));
+        CHECK(lift->assetCount==1&&lift->meshCount==1&&lift->templateCount==1&&lift->objectCount==1&&lift->cogCount==1);
+        const EdObject &object=lift->objects[0];CHECK(object.attributes.frameCount==2&&object.attributes.pathOverride);
+        CHECK(fabs(object.attributes.frames[0].position.z-object.position.z)<1e-8);
+        double high=-1e9;for(int f=0;f<lift->meshes[0].geometry.count;f++)for(int v=0;v<lift->meshes[0].geometry.f[f].count;v++)high=fmax(high,lift->meshes[0].geometry.f[f].v[v].p.z);
+        CHECK(fabs(high+object.position.z-lift->assets[0].origin.z-1.03125)<1e-6);
+        CHECK(fabs(object.attributes.frames[1].position.z-lift->assets[0].origin.z)<1e-8);
+        const EdObject &topObject=topLift->objects[0];
+        CHECK(fabs(topObject.position.z-object.attributes.frames[1].position.z)<1e-8);
+        CHECK(fabs(topObject.attributes.frames[0].position.z-topObject.position.z)<1e-8);
+        CHECK(fabs(topObject.attributes.frames[1].position.z-object.position.z)<1e-8);
+        CHECK(!strcmp(lift->cogs[0].params[2].value,"8"));
+        int sound=0;for(int p=0;p<lift->templates[0].count;p++)if(!strcmp(lift->templates[0].params[p].key,"soundclass"))sound=!strcmp(lift->templates[0].params[p].value,"sm_elev.snd");CHECK(sound);
+        CHECK(atoi(lift->cogs[0].params[0].value)==lift->spawnCount&&!strcmp(lift->cogs[0].params[1].value,"-1"));
+        unsigned bytes=0;unsigned char *encoded=edWireEncode(lift.get(),&bytes);CHECK(encoded&&edWireDecode(before.get(),encoded,bytes)&&edModelsEqual(before.get(),lift.get()));edFree(encoded);
+        CHECK(!edGenerateLift(lift.get(),1,"test_lift",script)&&edModelsEqual(before.get(),lift.get()));
+        // Elevatortest sector 2: the walking surface starts at Z=0.03125,
+        // regardless of the deep shaft floor at Z=-3.5625.
+        EdModel saved=*m;readGeometryFixture("lift_shaft_fixture.txt");CHECK(edValidate(m));
+        CHECK(edGenerateLift(m,2,"shaft_lift",script));
+        CHECK(fabs(m->objects[0].position.z-(.03125-1.875/2))<1e-8);
+        CHECK(fabs(m->objects[0].attributes.frames[1].position.z-1.875/2)<1e-8);
+        *m=std::move(saved);
+    }
+    {
+        // Monolith sector 110: a valid thin six-sided passage with offsets
+        // whose tiny Y residues overflowed the 31-byte COG vector field.
+        EdModel saved=*m;readGeometryFixture("destructible_offset_fixture.txt");
+        auto wall=std::make_unique<EdModel>();edDefault(wall.get());wall->c[0]=m->c[0];*m=std::move(saved);
+        EdVec center={};int count=0;for(int f=0;f<wall->c[0].count;f++)for(int v=0;v<wall->c[0].f[f].count;v++){center=edAdd(center,wall->c[0].f[f].v[v].p);count++;}
+        wall->spawn=wall->spawns[0].position=edScale(center,1.0/count);
+        EdBuffer<unsigned char> selected;selected[0]=1;CHECK(edValidate(wall.get())&&edGenerateDestructible(wall.get(),selected,"offset_wall"));
+        int legacyOverflow=0;for(int i=0;i<12;i++){
+            EdVec offset=edSub(wall->assets[i+1].origin,wall->assets[0].origin),parsed={};char old[128];snprintf(old,sizeof(old),"(%.6g/%.6g/%.6g)",offset.x,offset.y,offset.z);legacyOverflow|=strlen(old)>=32;
+            CHECK(sscanf(wall->cogs[0].params[35+i].value,"(%lf/%lf/%lf)",&parsed.x,&parsed.y,&parsed.z)==3);
+            CHECK(fabs(parsed.x-offset.x)<ED_EPS&&fabs(parsed.y-offset.y)<ED_EPS&&fabs(parsed.z-offset.z)<ED_EPS);
+        }
+        CHECK(legacyOverflow&&edValidate(wall.get()));
+    }
     if(argc>3&&!strcmp(argv[3],"--large-fixture")){EdCell room=m->c[0];m->count=1536;for(int i=1;i<m->count;i++){m->c[i]=room;for(int f=0;f<6;f++)for(int v=0;v<4;v++)m->c[i].f[f].v[v].p.x+=i*4;}CHECK(edValidate(m));}
     if(argc>2){FILE *r=fopen(argv[1],"rb");CHECK(r);fseek(r,0,SEEK_END);long n=ftell(r);rewind(r);char *resources=edAlloc(n+1);CHECK(fread(resources,1,n,r)==(size_t)n);resources[n]=0;fclose(r);
         if(getenv("GEOSITH_CLEANUP_FIXTURE_GOB")){EdLevelHeader header=m->header;readGeometryFixture("cleanup_fixture.txt");m->header=header;m->spawnCount=1;m->spawn=m->spawns[0].position=edV(-3.4375,4.4,.2);for(int s=0;s<m->count;s++){m->c[s].extraLight=.5;for(int f=0;f<m->c[s].count;f++)m->c[s].f[f].material=0;}edMapWorld(m);}
         CHECK(edWriteGob(m,argv[2],"Editor smoke test",0,resources));edFree(resources);}
     edFree(m);edFree(backup);puts("PASS: selection, cleave, extrusion, overlap CSG, partial portals, dragging, validation and GOB output");return 0;
 }
+
+
+

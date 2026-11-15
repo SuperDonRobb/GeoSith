@@ -34,3 +34,5 @@ rdModel3 *sithModel_Find(const char *name);
 rdModel3 *sithModel_RegisterEditor(const char *name,rdModel3 *owned);
 
 rdModel3 *sithModel_ReplaceEditor(const char *name,rdModel3 *owned);
+rdModel3 *sithModel_OverrideEditor(const char *name,rdModel3 *owned);
+void sithModel_BindEditor(const char *name,rdModel3 *model);

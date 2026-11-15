@@ -1,6 +1,11 @@
 // Host-owned leases are separate from the level document and undo history.
-static void terrainSessionReset(void){edFree(terrainSessionBase);terrainSessionBase=NULL;terrainSessionKey.clear();terrainPendingSlot=-1;terrainSessionFinishing=terrainLockPending=0;terrainLockToken=terrainLockTime=terrainAcceptedRevision=0;}
-static int terrainSessionOpen(void){return terrainSessionBase||terrainLockPending;}
+static void terrainSessionReset(void){edFree(terrainSessionBase);terrainSessionBase=NULL;terrainSessionKey.clear();terrainQueuedLockKey.clear();terrainPendingSlot=-1;terrainSessionFinishing=terrainLockPending=0;terrainLockToken=terrainLockTime=terrainAcceptedRevision=0;}
+static int terrainSessionOpen(void){return terrainSessionBase||terrainLockPending||!terrainQueuedLockKey.empty();}
+static void terrainSessionQueueBegin(int asset){
+    if(!netClient()||terrainSessionBase||terrainLockPending||terrainSessionFinishing)return;
+    terrainQueuedLockKey=edTerrainKey(model,asset);
+    if(!terrainQueuedLockKey.empty())say("Terrain lock queued; waiting for host approval. Hold Fire 1 to sculpt when ready.");
+}
 static void terrainLeaseBroadcast(const std::string &key,int player){
     const TerrainLease &lease=terrainLeases[key];char name[32]={};snprintf(name,sizeof(name),"%s",key.c_str());
     EditorNetHeader h={};h.kind=EN_TERRAIN_LOCK_STATE;h.id=lease.completed;h.origin=lease.owner;h.gesture=lease.token;h.revision=lease.revision;h.length=32;
@@ -26,7 +31,8 @@ static int terrainSessionLocalCommit(void){
     if(!netEnabled()||!terrainSessionBase||terrainSessionFinishing)return -1;
     // Only sculpt/paint/slot changes belong to a deferred terrain session.
     EdModel check=*candidate;if(!edTerrainOverlay(&check,model,terrainSessionKey)||!edModelsEqual(&check,model))return -1;
-    if(!edValidate(candidate))return 0;
+    // netApplyLocal enters commit with netApplying set and performs validation
+    // there. Avoid validating the entire level twice for every brush sample.
     pendingUndo=0;return netApplyLocal(candidate);
 }
 static int editingSessionBegin(const std::string &key){
@@ -66,6 +72,8 @@ int jkEditor_SurfaceLocked(const SithSurface *surface){
 }
 static bool editingSessionExists(const std::string &key){return edSurfaceSessionKey(key)?edSurfaceExists(model,key):edTerrainNamed(model,key)>=0;}
 static int terrainSessionFinish(void){
+    int queued=!terrainQueuedLockKey.empty();terrainQueuedLockKey.clear();
+    if(queued&&!terrainSessionBase&&!terrainLockPending)return 1;
     if(!terrainSessionOpen()||terrainSessionFinishing)return 0;
     terrainPendingSlot=-1;terrainStroke=grabbing=0;terrainElapsed=0;
     if(!terrainSessionBase||edTerrainSame(terrainSessionBase,model,terrainSessionKey)){
@@ -108,6 +116,16 @@ static int terrainLeaseMessage(int sender,const EditorNetHeader &h,const unsigne
     return 1;
 }
 static void terrainLeaseTick(uint32_t now){
+    if(!terrainQueuedLockKey.empty()){
+        if(!active||tool!=7||mapActive)terrainQueuedLockKey.clear();
+        else if(!netEditPending()){
+            std::string key=terrainQueuedLockKey;terrainQueuedLockKey.clear();
+            if(editingSessionExists(key)){
+                if(editingSessionBegin(key)){fireDown=grabDown=0;}
+                else if(terrainLockPending)terrainQueuedLockKey=key;
+            }
+        }
+    }
     if(sithNet_isServer){if(now-terrainLeaseTime>1000){terrainLeaseTime=now;for(auto &entry:terrainLeases)terrainLeaseBroadcast(entry.first);}}
     else if((terrainLockPending||terrainSessionFinishing==2)&&(!terrainLockTime||now-terrainLockTime>500)){
         terrainLockTime=now;char name[32]={};snprintf(name,32,"%s",terrainSessionKey.c_str());

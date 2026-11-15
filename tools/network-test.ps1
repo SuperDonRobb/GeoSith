@@ -66,6 +66,11 @@ try {
         } else { Start-Sleep -Milliseconds 600 }
     }
     foreach ($process in $processes) { if (-not $process.WaitForExit($TimeoutSeconds * 1000)) { throw "Network test timed out. See $testRoot" } }
+    if($env:GEOSITH_NET_COG_EXTERNAL_TEST){
+        foreach($role in 1..3){if($processes[$role-1].ExitCode -ne 0 -or !(Select-String -LiteralPath (Join-Path $testRoot "$role.stdout.log") -Pattern 'GEOSITH_NET_COG_EXTERNAL PASS' -Quiet)){throw "Custom COG network test failed: $testRoot"}}
+        Write-Host "PASS: custom COG import, client proposal, library synchronization, edited source and runtime. Logs: $testRoot"
+        return
+    }
     if($env:GEOSITH_NET_EDITOR_LOOK_TEST){
         foreach($role in 1..3){if($processes[$role-1].ExitCode -ne 0 -or !(Select-String -LiteralPath (Join-Path $testRoot "$role.stdout.log") -Pattern 'GEOSITH_NET_EDITOR_LOOK PASS' -Quiet)){throw "Editor join look test failed: $testRoot"}}
         Write-Host "PASS: both joining clients can look up/down while host stays editing. Logs: $testRoot"

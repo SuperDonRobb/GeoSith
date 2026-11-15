@@ -91,6 +91,8 @@ static void captureStairsAttributes(jkGuiMenu *menu) {
 static void surfaceAttributesDialog(void) {
     if(!allSelectedSurfaces(&picks)){say("Select one or more surfaces with weapon 1 first.");return;}
     int count=picks.count;EdSelection selected=picks;EdFace *draft=edCalloc(count,sizeof(*draft));if(!draft)return;
+    std::vector<int> surfaceNumbers(count);
+    for(int i=0;i<count;i++){EdHit h=selected.hits[i];int number=h.face;for(int s=0;s<h.cell;s++)number+=model->c[s].count;surfaceNumbers[i]=number;}
     char16_t stairSteps[16];double stairRise=1,stairRun=1;
     if(count==2)edStairsDimensions(model,selected.hits[0],selected.hits[1],&stairRise,&stairRun);
     char stepText[16];snprintf(stepText,sizeof(stepText),"%d",(int)fmin(ED_FACES-4,fmax(1,ceil(stairRise/ED_GRID))));stdString_CharToWchar(stairSteps,stepText,16);
@@ -101,9 +103,11 @@ static void surfaceAttributesDialog(void) {
     stdBitmap_EnsureData(jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);jkGui_SetModeMenu(jkGui_stdBitmaps[JKGUI_BM_BK_ESC]->palette);
     for(;;){
         const char16_t *labels[]={u"Material",u"U scale",u"V scale",u"Geometry mode",u"Texture mode",u"Light mode",u"Adjoin number",u"Adjoin flags",u"Surface flags",u"Face flags",u"Extra light",u"Adjoin distance"};
-        char16_t values[12][128],before[12][128],title[128];char text[160];jkGuiElement elements[32]={0};
+        char16_t values[12][128],before[12][128],title[128];char text[160];jkGuiElement elements[33]={0};
         elements[0]=jkGuiElement{ELEMENT_TEXT,0,2,NULL,3,{20,10,600,40},1};
-        snprintf(text,sizeof(text),"Surface Attributes - %d selected",count);stdString_CharToWchar(title,text,128);
+        if(count==1)snprintf(text,sizeof(text),"Surface %d Attributes",surfaceNumbers[0]);
+        else snprintf(text,sizeof(text),"Surface Attributes - %d selected",count);
+        stdString_CharToWchar(title,text,128);
         for(int field=0;field<12;field++){
             int mixed=0;for(int i=1;i<count;i++)if(field==0?draft[i].material!=draft[0].material:field==6?draft[i].neighbor!=draft[0].neighbor||draft[i].mirror!=draft[0].mirror:surfaceNumeric(&draft[i],field)!=surfaceNumeric(&draft[0],field))mixed=1;
             if(mixed)snprintf(text,sizeof(text),"<mixed>");else if(field==0)snprintf(text,sizeof(text),"%s",paletteNames[draft[0].material]);
@@ -118,9 +122,11 @@ static void surfaceAttributesDialog(void) {
         elements[26]=jkGuiElement{ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,430,230,36},1};
         elements[27]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,430,230,36},1};elements[28]=jkGuiElement{ELEMENT_TEXTBUTTON,300,0,NULL,3,{314,395,302,28},1};
         elements[29]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{24,397,176,24},1};
-        elements[30]=jkGuiElement{ELEMENT_TEXTBOX,0,0,NULL,3,{218,395,84,26},1};elements[31].type=ELEMENT_END;
+        elements[30]=jkGuiElement{ELEMENT_TEXTBOX,0,0,NULL,3,{218,395,84,26},1};
+        elements[31]=jkGuiElement{ELEMENT_TEXTBUTTON,301,0,NULL,3,{160,40,320,22},count>1};elements[32].type=ELEMENT_END;
         jkGuiMenu menu={elements,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};
         jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);elements[0].wstr=title;
+        elements[31].wstr=u"View selected surface numbers...";
         for(int i=0;i<12;i++){elements[1+i].wstr=labels[i];elements[13+i].wstr=values[i];}
         elements[25].wstr=u"Mixed values stay unchanged unless edited. Click modes or flags.";elements[26].wstr=u"Apply";
         elements[28].wstr=u"Create Stairs";elements[29].wstr=u"Stair steps";elements[30].wstr=stairSteps;
@@ -138,7 +144,11 @@ static void surfaceAttributesDialog(void) {
         }
         if(!valid){edFree(next);jkGuiDialog_ErrorDialog(u"Surface Attributes",u"Enter a known material name and finite numbers.\nScales must be nonzero; adjoin distance cannot be negative.");continue;}
         edCopy(draft,next,count*sizeof(*next));edFree(next);
-        if(choice==300){double number=0;
+        if(choice==301){
+            std::vector<std::array<char16_t,128>> names(count);
+            for(int i=0;i<count;i++){snprintf(text,sizeof(text),"Surface %d (sector %d)",surfaceNumbers[i],selected.hits[i].cell);stdString_CharToWchar(names[i].data(),text,128);}
+            chooseList(u"Selected Surface Numbers",reinterpret_cast<char16_t (*)[128]>(names.data()),count,0);
+        }else if(choice==300){double number=0;
             if(count!=2||!edStairsDimensions(model,selected.hits[0],selected.hits[1],NULL,NULL)){
                 jkGuiDialog_ErrorDialog(u"Create Stairs",u"Select two opposite vertical end walls in one six-face sector.\nSelect the high end first, then the low end.\nThe floor and ceiling must be horizontal.");continue;
             }

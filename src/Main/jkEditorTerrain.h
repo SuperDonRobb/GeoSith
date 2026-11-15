@@ -90,23 +90,34 @@ static void terrainApplyPendingTexture(void){
     if(terrainPendingSlot<0)return;int asset=edTerrainNamed(model,terrainPendingName);
     if(asset<0){terrainPendingSlot=-1;return;}
     if(!terrainSessionBegin(asset))return;
-    edCopyModel(candidate,model);for(int a=0;a<candidate->assetCount;a++)if(edTerrainMember(candidate,a,asset))snprintf(candidate->assets[a].paintSlots[terrainPendingSlot],128,"%s",paletteNames[terrainPendingMaterial]);
+    edCopyModel(candidate,model);
+    if(terrainPendingSlot==2){
+        if(edTerrainRemovePaint(candidate,asset,terrainPendingMaterial)){remember();if(commit())say("Texture paint removed. Texture 1 restored with tiled UVs. Ctrl+Z: undo.");}
+        terrainPendingSlot=-1;return;
+    }
+    for(int a=0;a<candidate->assetCount;a++)if(edTerrainMember(candidate,a,asset))snprintf(candidate->assets[a].paintSlots[terrainPendingSlot],128,"%s",paletteNames[terrainPendingMaterial]);
     remember();if(commit())say("Paint texture selected. Existing painting is preserved.");terrainPendingSlot=-1;
 }
 static void terrainMenu(void){
     BuilderMenuState state=builderMenuBegin();
     if(terrainSelected<0||terrainSelected>=model->assetCount||!model->assets[terrainSelected].terrain){std::unique_ptr<char16_t[][128]> names(new char16_t[model->assetCount][128]{});std::vector<int> ids(model->assetCount);int count=0;for(int a=0;a<model->assetCount;a++)if(model->assets[a].terrain){ids[count]=a;stdString_CharToWchar(names[count++],model->assets[a].name,128);}if(!count){terrainIntensityMenu();builderMenuEnd(state);return;}int choice=chooseList(u"Choose Terrain",names.get(),count,0);terrainSelected=choice>=0?ids[choice]:-1;}
     if(terrainSelected>=0&&terrainSelected<model->assetCount&&model->assets[terrainSelected].terrain){
-        char name[32];snprintf(name,32,"%s",model->assets[terrainSelected].name);char16_t title[128],choices[5][128]={u"Texture 1...",u"Convert to 3DO (model library)",u"Convert to walkstruct (keep in level)",u"Brush intensity...",u"Texture 2..."};stdString_CharToWchar(title,name,128);
+        char name[32];snprintf(name,32,"%s",model->assets[terrainSelected].name);char16_t title[128],choices[6][128]={u"Texture 1...",u"Convert to 3DO (model library)",u"Convert to walkstruct (keep in level)",u"Brush intensity...",u"Texture 2...",u"Remove Texture Paint"};stdString_CharToWchar(title,name,128);
         char intensityText[80];snprintf(intensityText,sizeof(intensityText),"Brush intensity: %.0f%%...",terrainIntensity*100);stdString_CharToWchar(choices[3],intensityText,128);
         for(int slot=0;slot<2;slot++){char label[180];const char *texture=model->assets[terrainSelected].paintSlots[slot];snprintf(label,sizeof(label),"Texture %d: %s...",slot+1,*texture?texture:"choose material");stdString_CharToWchar(choices[slot?4:0],label,128);}
-        int choice=chooseList(title,choices,5,0),asset=-1;for(int a=0;a<model->assetCount;a++)if(model->assets[a].terrain&&!strcmp(name,model->assets[a].name))asset=a;
+        int choice=chooseList(title,choices,6,0),asset=-1;for(int a=0;a<model->assetCount;a++)if(model->assets[a].terrain&&!strcmp(name,model->assets[a].name))asset=a;
         if(asset>=0&&(choice==0||choice==4)&&!netEditPending()){
             int slot=choice==4;
             int oldMaterial=currentMaterial,oldObjects=browserObjects;for(int i=0;i<model->meshCount;i++)if(model->meshes[i].asset==asset){currentMaterial=model->meshes[i].geometry.f[0].material;break;}
             if(model->assets[asset].paintSlots[slot][0]){int id=addMaterialName(model->assets[asset].paintSlots[slot]);if(id>=0)currentMaterial=id;}
             browserObjects=0;materialMenu(1);int material=currentMaterial;currentMaterial=oldMaterial;browserObjects=oldObjects;
             if(asset<model->assetCount&&model->assets[asset].terrain&&!strcmp(name,model->assets[asset].name)&&!netEditPending()){terrainPendingSlot=slot;terrainPendingMaterial=material;snprintf(terrainPendingName,32,"%s",name);terrainApplyPendingTexture();}
+        }else if(asset>=0&&choice==5&&!netEditPending()){
+            int material=-1;const char *first=model->assets[asset].paintSlots[0];
+            if(*first)material=addMaterialName(first);
+            else for(int i=0;i<model->meshCount;i++)if(model->meshes[i].asset==asset){material=model->meshes[i].geometry.f[0].material;break;}
+            if(material>=0){terrainPendingSlot=2;terrainPendingMaterial=material;snprintf(terrainPendingName,32,"%s",name);terrainApplyPendingTexture();}
+            else say("Could not load the first terrain material.");
         }else if(choice==3)terrainIntensityMenu();else if(asset>=0&&(choice==1||choice==2))terrainConvert(asset,choice==2);
     }
     builderMenuEnd(state);

@@ -1,6 +1,6 @@
 /* Sector selection uses the same transactions as surface edits. */
 static void mergeSelectedSectors(void){
-    if(selectedSectorCount()<2){say("Ctrl+click at least two sectors, then press M to merge.");return;}
+    if(selectedSectorCount()<2){say("Shift+click at least two sectors, then press M to merge.");return;}
     if(netEditPending()){say("Wait for the current edit before merging sectors.");return;}
     edCopyModel(candidate,model);int merged=-1;
     if(!edMergeSectors(candidate,sectorPicks,&merged)){say("Merge cancelled: sectors must form one closed convex sector within the surface limits.");return;}
@@ -16,7 +16,7 @@ static void captureSectorAttributes(jkGuiMenu *menu){
 #endif
     menu->lastClicked=stage++?1:200;
 }
-static void sectorFlagsDialog(std::vector<EdCell>& draft){
+static unsigned int sectorFlagsDialog(std::vector<EdCell>& draft){
     const char *names[32]={"No gravity","Underwater","Used in COG","Apply thrust","Hide on map","No actor entry","Fall death","Adjoins off",NULL,NULL,NULL,NULL,"Collision box (managed)",NULL,"Seen on map","Network sync"};
     unsigned int common=~0u,combined=0;for(auto &cell:draft){common&=cell.flags;combined|=cell.flags;}
     jkGuiElement elements[37]={0};char16_t labels[32][96];
@@ -34,9 +34,10 @@ static void sectorFlagsDialog(std::vector<EdCell>& draft){
     elements[0].wstr=u"Sector Flags";elements[33].wstr=u"~ Mixed values. Collision box is managed by the engine.";elements[34].wstr=u"OK";
     for(int bit=0;bit<32;bit++)elements[bit+1].wstr=labels[bit];surfaceFlagsTouched=0;
     jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&elements[35]);jkGuiRend_MenuSetReturnKeyShortcutElement(&menu,&elements[34]);
-    if(getenv("GEOSITH_SECTOR_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=captureSectorFlags;
-    if(jkGuiRend_DisplayAndReturnClicked(&menu)==1){unsigned int value=0;for(int bit=0;bit<32;bit++)if(elements[bit+1].boxChecked)value|=1u<<bit;unsigned int mask=surfaceFlagsTouched&~SITH_SECTOR_HASCOLLIDEBOX;for(auto &cell:draft)cell.flags=(cell.flags&~mask)|(value&mask);}
-    freeMenuStrings(elements);
+    if((getenv("GEOSITH_SECTOR_TEST")||getenv("GEOSITH_SPLINE_FLAGS_TEST"))&&getenv("GEOSITH_STRESS"))menu.idkFunc=captureSectorFlags;
+    unsigned int appliedMask=0;
+    if(jkGuiRend_DisplayAndReturnClicked(&menu)==1){unsigned int value=0;for(int bit=0;bit<32;bit++)if(elements[bit+1].boxChecked)value|=1u<<bit;unsigned int mask=surfaceFlagsTouched&~SITH_SECTOR_HASCOLLIDEBOX;appliedMask=mask;for(auto &cell:draft)cell.flags=(cell.flags&~mask)|(value&mask);}
+    freeMenuStrings(elements);return appliedMask;
 }
 static void sectorFieldText(const EdCell &cell,int field,char *text,size_t size){
     switch(field){
@@ -84,6 +85,10 @@ static void sectorSoundDialog(std::vector<EdCell>& draft){
     if(choice&&!sithSound_Load((char*)name,0)){jkGuiDialog_ErrorDialog(u"Ambient Sound",u"Could not load that sound.");return;}
     for(auto &cell:draft)snprintf(cell.sound,sizeof(cell.sound),"%s",name);
 }
+static int sectorGenerateMenu(void){
+    char16_t entries[3][128];stdString_SafeWStrCopy(entries[0],u"Destructible",128);stdString_SafeWStrCopy(entries[1],u"Lift_Bottom",128);stdString_SafeWStrCopy(entries[2],u"Lift_Top",128);
+    return chooseList(u"Generate",entries,3,0);
+}
 static void sectorAttributesDialog(void){
     std::vector<int> selected;std::vector<EdCell> draft;
     for(int s=0;s<model->count;s++)if(sectorPicks[s]){selected.push_back(s);draft.push_back(model->c[s]);}
@@ -94,8 +99,9 @@ static void sectorAttributesDialog(void){
     stdBitmap_EnsureData(jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);jkGui_SetModeMenu(jkGui_stdBitmaps[JKGUI_BM_BK_ESC]->palette);
     for(;;){
         const char16_t *labels[]={u"Flags",u"Extra light (0-1)",u"Colormap",u"Tint R G B (0-1)",u"Ambient sound",u"Volume (0-1)"};
-        char16_t values[7][128],before[7][128],title[128];jkGuiElement elements[19]={0};char text[160],other[160];
-        snprintf(text,sizeof(text),"Sector Attributes - %d selected",(int)selected.size());stdString_CharToWchar(title,text,128);
+        char16_t values[7][128],before[7][128],title[128];jkGuiElement elements[21]={0};char text[160],other[160];
+        if(selected.size()==1)snprintf(text,sizeof(text),"Sector %d Attributes",selected[0]);
+        else snprintf(text,sizeof(text),"Sector Attributes - %d selected",(int)selected.size());stdString_CharToWchar(title,text,128);
         elements[0]=jkGuiElement{ELEMENT_TEXT,0,2,NULL,3,{20,10,600,40},1};
         for(int field=0;field<6;field++){
             sectorFieldText(draft[0],field,text,sizeof(text));int mixed=0;
@@ -109,18 +115,43 @@ static void sectorAttributesDialog(void){
         elements[14]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{24,320,592,24},1};
         elements[15]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{24,365,592,48},1};
         elements[16]=jkGuiElement{ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,430,230,36},1};
-        elements[17]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,430,230,36},1};elements[18].type=ELEMENT_END;
+        elements[17]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,430,230,36},1};elements[18]=jkGuiElement{ELEMENT_TEXTBUTTON,205,0,NULL,3,{400,365,216,36},1};elements[19]=jkGuiElement{ELEMENT_TEXTBUTTON,206,0,NULL,3,{160,48,320,24},selected.size()>1};elements[20].type=ELEMENT_END;
         jkGuiMenu menu={elements,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);
-        elements[0].wstr=title;for(int f=0;f<6;f++){elements[1+f].wstr=labels[f];elements[8+f].wstr=values[f];}
+        elements[0].wstr=title;elements[19].wstr=u"View selected sector numbers...";for(int f=0;f<6;f++){elements[1+f].wstr=labels[f];elements[8+f].wstr=values[f];}
         elements[7].wstr=u"Browse";elements[14].wstr=u"Choose <none> in the sound browser to clear ambient sound.";
-        elements[15].wstr=u"Mixed values stay unchanged unless edited.";elements[16].wstr=u"Apply";
+        elements[15].rect.width=360;elements[15].wstr=u"Mixed values stay unchanged unless edited.";elements[18].wstr=u"Generate";elements[16].wstr=u"Apply";
         jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&elements[17]);jkGuiRend_MenuSetReturnKeyShortcutElement(&menu,&elements[16]);
-        if(getenv("GEOSITH_SECTOR_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=captureSectorAttributes;
+        if((getenv("GEOSITH_SECTOR_TEST")||getenv("GEOSITH_SPLINE_FLAGS_TEST"))&&getenv("GEOSITH_STRESS"))menu.idkFunc=captureSectorAttributes;
+        if(getenv("GEOSITH_DESTRUCTIBLE_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=generateMenuTest;
         int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(elements);if(choice<0)break;
         std::vector<EdCell> edited=draft;int valid=1;
         for(int f=0;f<6;f++)if(f!=0&&f!=2&&memcmp(before[f],values[f],sizeof(values[f]))){stdString_WcharToChar(text,values[f],sizeof(text));for(auto &cell:edited)valid=valid&&sectorFieldSet(cell,f,text);}
         if(!valid){jkGuiDialog_ErrorDialog(u"Sector Attributes",u"Use finite values from 0 to 1 for light, volume and tint.\nSound names must be WAV filenames.");continue;}draft=std::move(edited);
-        if(choice==200)sectorFlagsDialog(draft);
+        if(choice==206){
+            std::vector<std::array<char16_t,128>> names(selected.size());
+            for(size_t i=0;i<selected.size();i++){snprintf(text,sizeof(text),"Sector %d",selected[i]);stdString_CharToWchar(names[i].data(),text,128);}
+            chooseList(u"Selected Sector Numbers",reinterpret_cast<char16_t (*)[128]>(names.data()),(int)names.size(),0);
+        }
+        else if(choice==205){
+            if(!edModelsEqual(&original,model)||netEditPending()){say("Level changed or an edit is pending. Reopen sector attributes.");break;}
+            int generate=sectorGenerateMenu();if(generate<0)continue;
+            if(generate==1||generate==2){
+                if(selected.size()!=1){jkGuiDialog_ErrorDialog(u"Lift",u"Select one sector to turn into a lift.");continue;}
+                if(!sithTemplate_GetTemplate("_walkstruct")){jkGuiDialog_ErrorDialog(u"Lift",u"The _walkstruct base template is unavailable.");continue;}
+                EdPlacedCog cog={};char *script=cogSourceText("12_trooperelev.cog");int parsed=script&&edCogParseScript(&cog,"12_trooperelev.cog",script);edFree(script);
+                if(!parsed){jkGuiDialog_ErrorDialog(u"Lift",u"Could not load the game's 12_trooperelev.cog elevator script.");continue;}
+                char name[32];for(int n=1;;n++){snprintf(name,sizeof(name),"gs_lift%d",n);int exists=sithTemplate_GetTemplate(name)!=NULL||edTemplateIndex(model,name)>=0;for(int a=0;a<model->assetCount;a++)exists|=!strcmp(model->assets[a].name,name);if(!exists)break;}
+                edCopyModel(candidate,model);candidate->c[selected[0]]=draft[0];
+                if(!edGenerateLift(candidate,selected[0],name,cog,generate==2)){jkGuiDialog_ErrorDialog(u"Lift",u"Could not create the lift. The selected sector must be taller than 0.03125 units, with a shaft below for the lowered model.\nConvert editable splines first and check custom template capacity.");continue;}
+                remember();if(commit()){sectorPicks.clear();picks.count=0;say("Lift generated with two frames and a step-on elevator COG. Ctrl+Z: undo.");break;}continue;
+            }
+            if(!sithTemplate_GetTemplate("_walkstruct")||!sithTemplate_GetTemplate("_throwable")||!sithTemplate_GetTemplate("_explosion")){jkGuiDialog_ErrorDialog(u"Generate",u"Required game templates are unavailable.");continue;}
+            char name[32];for(int n=1;;n++){snprintf(name,sizeof(name),"gs_wall%d",n);int exists=sithTemplate_GetTemplate(name)!=NULL||edTemplateIndex(model,name)>=0;for(int a=0;a<model->assetCount;a++)exists|=!strcmp(model->assets[a].name,name);if(!exists)break;}
+            edCopyModel(candidate,model);for(size_t i=0;i<selected.size();i++)candidate->c[selected[i]]=draft[i];
+            if(!edGenerateDestructible(candidate,sectorPicks,name)){jkGuiDialog_ErrorDialog(u"Destructible",u"Could not fracture these sectors. Convert editable splines first.\nRequires free custom template capacity (14 by default), valid convex cells, and at most 32 selected sectors.");continue;}
+            remember();if(commit()){sectorPicks.clear();picks.count=0;say("Destructible wall generated with debris and a placed COG. Explosion/saber damage breaks it. Ctrl+Z: undo.");break;}
+        }
+        else if(choice==200)sectorFlagsDialog(draft);
         else if(choice==204)sectorSoundDialog(draft);
         else if(choice==202){std::vector<std::array<char16_t,128>> names(colormapCount+1);stdString_SafeWStrCopy(names[0].data(),u"<level default>",128);int current=0;
             for(int i=0;i<colormapCount;i++){stdString_CharToWchar(names[i+1].data(),editorColormaps[i].name,128);if(!__strcmpi(draft[0].colormap,editorColormaps[i].name))current=i+1;}

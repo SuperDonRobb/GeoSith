@@ -1,4 +1,5 @@
 #include "sithCogFunctionSound.h"
+#include "Main/jkEditor.h"
 
 #include "Devices/sithSoundMixer.h"
 #include "World/sithSoundClass.h"
@@ -99,7 +100,7 @@ void sithCogFunctionSound_PlaySoundThing(sithCog *pCog)
         }
     }
     if ( playingSound )
-        sithCogExec_PushInt(pCog, playingSound->refid);
+        { jkEditor_CogSoundStarted(pCog,playingSound,COG_SHOULD_SYNC(pCog)); sithCogExec_PushInt(pCog, playingSound->refid); }
     else
         sithCogExec_PushInt(pCog, -1);
 }
@@ -153,7 +154,7 @@ void sithCogFunctionSound_PlaySoundPos(sithCog *pCog)
     }
 
     if ( playingSound )
-        sithCogExec_PushInt(pCog, playingSound->refid);
+        { jkEditor_CogSoundStarted(pCog,playingSound,COG_SHOULD_SYNC(pCog)); sithCogExec_PushInt(pCog, playingSound->refid); }
     else
         sithCogExec_PushInt(pCog, -1);
 }
@@ -194,7 +195,7 @@ void sithCogFunctionSound_PlaySoundLocal(sithCog *pCog)
     sithPlayingSound* playingSound = sithSoundMixer_PlaySound(pSound, volume, pan, flags & ~(SITHSOUNDFLAG_FOLLOWSTHING|SITHSOUNDFLAG_ABSOLUTE));
 
     if ( playingSound )
-        sithCogExec_PushInt(pCog, playingSound->refid);
+        { jkEditor_CogSoundStarted(pCog,playingSound,0); sithCogExec_PushInt(pCog, playingSound->refid); }
     else
         sithCogExec_PushInt(pCog, -1);
 }
@@ -239,7 +240,7 @@ void sithCogFunctionSound_PlaySoundGlobal(sithCog *pCog)
         {
             sithDSSThing_PlaySound(0, 0, pSound, volume, pan, flagsTmp, playingSound->refid, -1, 255);
         }
-        sithCogExec_PushInt(pCog, playingSound->refid);
+        { jkEditor_CogSoundStarted(pCog,playingSound,COG_SHOULD_SYNC(pCog)); sithCogExec_PushInt(pCog, playingSound->refid); }
     }
     else
     {
@@ -291,7 +292,7 @@ void sithCogFunctionSound_PlaySoundClass(sithCog *pCog)
 
     if ( pThing && pThing->pSoundClass && (pPlayingSound = sithSoundClass_PlayModeRandom(pThing, soundClassId)) != 0 )
     {
-        sithCogExec_PushInt(pCog, pPlayingSound->refid);
+        { jkEditor_CogSoundStarted(pCog,pPlayingSound,COG_SHOULD_SYNC(pCog)); sithCogExec_PushInt(pCog, pPlayingSound->refid); }
         if (COG_SHOULD_SYNC(pCog))
         {
             sithDSSThing_PlaySoundMode(pThing, soundClassId, pPlayingSound->refid, -1.0);
@@ -438,7 +439,7 @@ void sithCogFunctionSound_PlaySoundThingLocal(sithCog *pCog)
         playingSound = sithSoundMixer_PlaySound(pSound, volume, 0.0, flags);
     }
     if ( playingSound )
-        sithCogExec_PushInt(pCog, playingSound->refid);
+        { jkEditor_CogSoundStarted(pCog,playingSound,0); sithCogExec_PushInt(pCog, playingSound->refid); }
     else
         sithCogExec_PushInt(pCog, -1);
 }
@@ -482,7 +483,7 @@ void sithCogFunctionSound_PlaySoundPosLocal(sithCog *pCog)
     playingSound = sithSoundMixer_PlaySoundPos(pSound, &pos, 0, volume, minDist_act, maxDist_act, flags | SITHSOUNDFLAG_ABSOLUTE);
 
     if ( playingSound )
-        sithCogExec_PushInt(pCog, playingSound->refid);
+        { jkEditor_CogSoundStarted(pCog,playingSound,0); sithCogExec_PushInt(pCog, playingSound->refid); }
     else
         sithCogExec_PushInt(pCog, -1);
 }
@@ -571,7 +572,7 @@ void sithCogFunctionSound_PlaySoundThingAndWait(sithCog *pCog)
         pCog->script_running = 2;
         pCog->msecTimerTimeout = sithTime_g_msecGameTime + pSound->sound_len;
 
-        sithCogExec_PushInt(pCog, playingSound->refid);
+        { jkEditor_CogSoundStarted(pCog,playingSound,COG_SHOULD_SYNC(pCog)); sithCogExec_PushInt(pCog, playingSound->refid); }
     }
     else
         sithCogExec_PushInt(pCog, -1);

@@ -1,5 +1,36 @@
 /* Linked terrain patches retain original vertex normals and shared seams.
    Each source sector owns a separate ordinary mesh asset and placed thing. */
+#include <array>
+#include <unordered_map>
+#include <set>
+// Preserve the original first-match welding tolerance without all-pairs scans.
+struct TerrainVertexIndex {
+    using Key=std::array<long long,3>;
+    struct Hash {size_t operator()(const Key &k)const{return std::hash<long long>{}(k[0])^(std::hash<long long>{}(k[1])*16777619u)^(std::hash<long long>{}(k[2])*2166136261u);}};
+    std::unordered_map<Key,std::vector<int>,Hash> buckets;std::vector<EdVec> points;
+    bool reference=getenv("GEOSITH_TERRAIN_REFERENCE")!=NULL;
+    int index(EdVec p){
+        Key key={(long long)floor(p.x/1e-8),(long long)floor(p.y/1e-8),(long long)floor(p.z/1e-8)};int found=(int)points.size();
+        if(reference){for(int i=0;i<(int)points.size();i++)if(length(edSub(p,points[i]))<1e-8){found=i;break;}}
+        else for(int x=-1;x<=1;x++)for(int y=-1;y<=1;y++)for(int z=-1;z<=1;z++){
+            auto it=buckets.find({key[0]+x,key[1]+y,key[2]+z});if(it==buckets.end())continue;
+            for(int i:it->second)if(i<found&&length(edSub(p,points[i]))<1e-8)found=i;
+        }
+        if(found==(int)points.size()){points.push_back(p);if(!reference)buckets[key].push_back(found);}return found;
+    }
+};
+struct TerrainSectorIndex {
+    const EdModel *model;std::vector<EdResolveBounds> bounds;
+    TerrainSectorIndex(const EdModel *m):model(m){for(int c=0;c<m->count;c++)bounds.push_back(resolveBounds(m->c[c]));}
+    int contains(EdVec p)const{
+        const bool reference=getenv("GEOSITH_TERRAIN_REFERENCE")!=NULL;
+        for(int c=0;c<model->count;c++){
+            const auto &b=bounds[c];double pad=fmax(ED_IMPORT_EPS*4,model->c[c].tolerance*4);
+            if(!reference&&(p.x<b.low.x-pad||p.y<b.low.y-pad||p.z<b.low.z-pad||p.x>b.high.x+pad||p.y>b.high.y+pad||p.z>b.high.z+pad))continue;
+            if(edContains(&model->c[c],p))return 1;
+        }return 0;
+    }
+};
 static int terrainInside(const std::vector<EdFace>& faces,EdVec point,EdVec normal){
     for(const EdFace &face:faces){int inside=1;for(int v=0;v<face.count;v++)if(edDot(edCross(edSub(face.v[(v+1)%face.count].p,face.v[v].p),edSub(point,face.v[v].p)),normal)<-1e-9){inside=0;break;}if(inside)return 1;}return 0;
 }
@@ -12,16 +43,17 @@ int edTerrainObject(const EdModel *m,int object){
 // lengths toward their 3D lengths, retaining seams and world texture density.
 static void terrainMapUV(EdModel *m,int asset){
     struct Node {EdVec p,uv;};struct Corner {int mesh,face,vertex,node;};struct Edge {int a,b;double distance;};
+    TerrainVertexIndex vertexIndex;std::set<std::pair<int,int>> edgeIndex;
     std::vector<Node> nodes;std::vector<Corner> corners;std::vector<Edge> edges;EdVec normal={};int group=m->assets[asset].terrainGroup;
     for(int i=0;i<m->meshCount;i++){
         EdMesh &mesh=m->meshes[i];if(mesh.asset!=asset&&(!group||!m->assets[mesh.asset].terrain||m->assets[mesh.asset].terrainGroup!=group))continue;
         for(int f=0;f<mesh.geometry.count;f++){
             int ids[3];for(int v=0;v<3;v++){
-                EdVec p=mesh.geometry.f[f].v[v].p;int id=0;for(;id<(int)nodes.size();id++)if(length(edSub(p,nodes[id].p))<1e-8)break;
+                EdVec p=mesh.geometry.f[f].v[v].p;int id=vertexIndex.index(p);
                 if(id==(int)nodes.size()){nodes.push_back({p,{}});normal=edAdd(normal,mesh.terrainNormals.size()?mesh.terrainNormals[f*3+v]:m->assets[mesh.asset].terrainNormal);}
                 ids[v]=id;corners.push_back({i,f,v,id});
             }
-            for(int v=0;v<3;v++){int a=(std::min)(ids[v],ids[(v+1)%3]),b=(std::max)(ids[v],ids[(v+1)%3]);int found=0;for(const auto &edge:edges)if(edge.a==a&&edge.b==b){found=1;break;}if(!found&&a!=b)edges.push_back({a,b,length(edSub(nodes[a].p,nodes[b].p))});}
+            for(int v=0;v<3;v++){int a=(std::min)(ids[v],ids[(v+1)%3]),b=(std::max)(ids[v],ids[(v+1)%3]);int found=0;if(vertexIndex.reference){for(const auto &edge:edges)if(edge.a==a&&edge.b==b){found=1;break;}}else found=!edgeIndex.insert({a,b}).second;if(!found&&a!=b)edges.push_back({a,b,length(edSub(nodes[a].p,nodes[b].p))});}
         }
     }
     if(nodes.empty())return;if(length(normal)<1e-8)normal=m->assets[asset].terrainNormal;normal=unit(normal);
@@ -93,7 +125,7 @@ int edTerrainCreate(EdModel *out,const EdModel *source,const EdSelection *surfac
         int mesh=-1,asset=assets[sector];
         for(size_t t=0;t<triangles.size();t++)if(owners[t]==sectors[sector]){
             const EdFace &triangle=triangles[t];
-            if(mesh<0||draft.meshes[mesh].geometry.count==160){if(draft.meshCount>=ED_MESHES)return 0;mesh=draft.meshCount++;draft.meshes[mesh]={};draft.meshes[mesh].asset=asset;}
+            if(mesh<0||draft.meshes[mesh].geometry.count>=ED_TERRAIN_MESH_TRIANGLES){if(draft.meshCount>=ED_MESHES)return 0;mesh=draft.meshCount++;draft.meshes[mesh]={};draft.meshes[mesh].asset=asset;}
             EdMesh &part=draft.meshes[mesh];int f=part.geometry.count++;part.geometry.f[f]=triangle;
             for(int k=0;k<3;k++){
                 EdVec p=triangle.v[k].p,sum={};std::vector<EdVec> normals;
@@ -119,19 +151,19 @@ int edTerrainSculpt(EdModel *m,int asset,EdVec center,double radius,double amoun
     if(asset<0||asset>=m->assetCount||!m->assets[asset].terrain||!isfinite(radius)||radius<ED_GRID||!isfinite(amount)||fabs(amount)>1)return 0;
     if(length(normal)<1e-8){double nearest=1e30;for(int i=0;i<m->meshCount;i++)if(m->meshes[i].asset==asset)for(int f=0;f<m->meshes[i].geometry.count;f++){const EdFace &face=m->meshes[i].geometry.f[f];EdVec mid=edScale(edAdd(edAdd(face.v[0].p,face.v[1].p),face.v[2].p),1.0/3);double distance=length(edSub(mid,center));if(distance<nearest){nearest=distance;normal=edNormal(&face);}}}
     if(!isfinite(length(normal))||length(normal)<1e-8)return 0;normal=unit(normal);
-    int changed=0,group=m->assets[asset].terrainGroup;
-    struct Move {EdVec from,to;};std::vector<Move> moves;
+    TerrainSectorIndex sectors(m);int changed=0,group=m->assets[asset].terrainGroup;
+    struct Move {EdVec from,to;};std::vector<Move> moves;TerrainVertexIndex vertexIndex;
     // Decide once per shared position, then apply to every duplicated corner.
     for(int i=0;i<m->meshCount;i++)if(m->meshes[i].asset==asset||(group&&m->assets[m->meshes[i].asset].terrain&&m->assets[m->meshes[i].asset].terrainGroup==group)){
         EdMesh &mesh=m->meshes[i];
         for(int f=0;f<mesh.geometry.count;f++)for(int v=0;v<3;v++){
             EdVertex &vertex=mesh.geometry.f[f].v[v];Move *found=NULL;
-            for(auto &move:moves)if(length(edSub(move.from,vertex.p))<1e-8){found=&move;break;}
+            int id=vertexIndex.index(vertex.p);if(id<(int)moves.size())found=&moves[id];
             if(found){vertex.p=found->to;continue;}
             EdVec delta=edSub(vertex.p,center),n=normal;
             if(!mesh.terrainNormals.size())delta=edSub(delta,edScale(normal,edDot(delta,normal)));
             double r=length(delta)/radius,step=r<1?amount*(1-r*r)*(1-r*r):0;
-            EdVec next=edAdd(vertex.p,edScale(n,step));int inside=0;for(int s=0;s<m->count&&!inside;s++)inside=edContains(&m->c[s],next);
+            EdVec next=edAdd(vertex.p,edScale(n,step));int inside=(step==0&&!vertexIndex.reference)||sectors.contains(next);
             if(!inside)next=vertex.p;
             changed|=length(edSub(next,vertex.p))>1e-12;moves.push_back({vertex.p,next});vertex.p=next;
         }
@@ -144,13 +176,13 @@ int edTerrainSmooth(EdModel *m,int asset,EdVec center,double radius,double stren
     if(asset<0||asset>=m->assetCount||!m->assets[asset].terrain||!isfinite(radius)||radius<ED_GRID||!isfinite(strength)||strength<=0||strength>1||!isfinite(length(center)))return 0;
     struct Node {EdVec position,normal,next;std::vector<int> neighbors;};
     struct Corner {int mesh,face,vertex,node;};
-    std::vector<Node> nodes;std::vector<Corner> corners;int group=m->assets[asset].terrainGroup;
+    TerrainVertexIndex vertexIndex;std::vector<Node> nodes;std::vector<Corner> corners;int group=m->assets[asset].terrainGroup;
     for(int i=0;i<m->meshCount;i++){
         const EdMesh &mesh=m->meshes[i];const EdAsset &a=m->assets[mesh.asset];
         if(mesh.asset!=asset&&(!group||!a.terrain||a.terrainGroup!=group))continue;
         for(int f=0;f<mesh.geometry.count;f++){
             int ids[3];for(int v=0;v<3;v++){
-                EdVec p=mesh.geometry.f[f].v[v].p;int id=0;for(;id<(int)nodes.size();id++)if(length(edSub(p,nodes[id].position))<1e-8)break;
+                EdVec p=mesh.geometry.f[f].v[v].p;int id=vertexIndex.index(p);
                 if(id==(int)nodes.size())nodes.push_back({p,mesh.terrainNormals.size()?mesh.terrainNormals[f*3+v]:a.terrainNormal,p,{}});
                 ids[v]=id;corners.push_back({i,f,v,id});
             }
@@ -159,14 +191,14 @@ int edTerrainSmooth(EdModel *m,int asset,EdVec center,double radius,double stren
             }
         }
     }
-    int changed=0;
+    TerrainSectorIndex sectors(m);int changed=0;
     // Average unique connected vertices from the unchanged stroke snapshot.
     // Relax in all directions to untangle pinches, including lateral bunching.
     for(auto &node:nodes){
         double r=length(edSub(node.position,center))/radius;if(r>=1||node.neighbors.empty())continue;
         EdVec average={};for(int neighbor:node.neighbors)average=edAdd(average,nodes[neighbor].position);average=edScale(average,1.0/node.neighbors.size());
         EdVec movement=edScale(edSub(average,node.position),strength*(1-r*r));
-        double step=length(movement);EdVec next=edAdd(node.position,movement);int inside=0;for(int s=0;s<m->count&&!inside;s++)inside=edContains(&m->c[s],next);
+        double step=length(movement);EdVec next=edAdd(node.position,movement);int inside=sectors.contains(next);
         if(inside){node.next=next;changed|=fabs(step)>1e-12;}
     }
     if(!changed)return 0;
@@ -186,4 +218,22 @@ int edTerrainGrab(EdModel *out,const EdModel *source,int asset,EdVec center,doub
     }
     terrainMapUV(&draft,asset);
     if(!edMeshValidate(&draft))return 0;edCopyModel(out,&draft);return 1;
+}
+
+// Restore one tiled material across every part of a connected terrain.
+int edTerrainRemovePaint(EdModel *m,int asset,int material){
+    if(asset<0||asset>=m->assetCount||!m->assets[asset].terrain||material<0)return 0;
+    int group=m->assets[asset].terrainGroup;
+    for(int i=0;i<m->meshCount;i++){
+        EdMesh &mesh=m->meshes[i];int a=mesh.asset;
+        if(a!=asset&&(!group||!m->assets[a].terrain||m->assets[a].terrainGroup!=group))continue;
+        mesh.paint.clear();
+        for(int f=0;f<mesh.geometry.count;f++){
+            EdFace &face=mesh.geometry.f[f];face.material=material;face.decalId=0;
+            face.uOffset=face.vOffset=face.uvRotation=0;
+            if(face.hasAttributes)face.attributes.uScale=face.attributes.vScale=1;
+        }
+    }
+    terrainMapUV(m,asset);
+    return edMeshValidate(m);
 }

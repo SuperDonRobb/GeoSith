@@ -64,7 +64,6 @@ int jkControl_HandleChat(void)
 int jkControl_HandleHudKeys(SithThing *player, flex_t b)
 {
     char16_t *v2; // eax
-    char16_t *v5; // eax
     int v15; // [esp+4h] [ebp-304h] BYREF
     char16_t v16[128]; // [esp+8h] [ebp-300h] BYREF
     char16_t a4[256]; // [esp+108h] [ebp-200h] BYREF
@@ -87,21 +86,7 @@ int jkControl_HandleHudKeys(SithThing *player, flex_t b)
             }
         }
 
-        sithControl_GetKey(INPUT_FUNC_CAMERAMODE, &v15);
-        for (int i = v15-- == 0; !i; --v15 )
-        {
-            if ( (player->flags & (SITH_TF_DEAD|SITH_TF_DESTROYED)) == 0 && sithThing_MotsTick(0xe,0,0.0)) // MOTS altered
-            {
-                sithCamera_CycleCamera();
-                //DAT_005b9254 = 2; // MOTS TODO
-                if ( (sithCamera_g_pCurCamera->type & 0xFC) != 0 )
-                    v5 = jkStrings_GetUniStringWithFallback("GAME_EXTERNALCAM");
-                else
-                    v5 = jkStrings_GetUniStringWithFallback("GAME_INTERNALCAM");
-                jkDev_PrintUniString(v5);
-            }
-            i = v15 == 0;
-        }
+        jkControl_HandleCamera(player);
 
         if ( !sithOverlayMap_bMapVisible )
         {
@@ -145,6 +130,18 @@ int jkControl_HandleHudKeys(SithThing *player, flex_t b)
             jkHud_Tally();
     }
     return 0;
+}
+
+void jkControl_HandleCamera(SithThing *player) {
+    int presses=0;
+    sithControl_GetKey(INPUT_FUNC_CAMERAMODE, &presses);
+    while (presses-- > 0) {
+        if (!(player->flags & (SITH_TF_DEAD|SITH_TF_DESTROYED)) && sithThing_MotsTick(0xe,0,0.0)) {
+            sithCamera_CycleCamera();
+            jkDev_PrintUniString(jkStrings_GetUniStringWithFallback(
+                (sithCamera_g_pCurCamera->type & 0xFC) ? "GAME_EXTERNALCAM" : "GAME_INTERNALCAM"));
+        }
+    }
 }
 
 void jkControl_HandleScreenshot(void) {

@@ -1,3 +1,4 @@
+#include <string>
 #include "edLevelIO.h"
 #include "edWire.h"
 #include <stdio.h>
@@ -56,10 +57,18 @@ static void writeCustomTemplates(FILE *f,const EdModel *m){
 }
 static void writeResources(FILE *f,const EdModel *m,const char *resources){int skip=0,wrote=0,templates=0;
     for(const char *p=resources;*p;){const char *end=strchr(p,'\n');size_t n=end?(size_t)(end-p)+1:strlen(p);char section[64],line[256];size_t length=n<255?n:255;for(size_t i=0;i<length;i++)line[i]=(char)tolower((unsigned char)p[i]);line[length]=0;
+        // Editor metadata is regenerated from the document below, not a resource.
+        // Copying it here accumulated stale face/light indices on every save.
+        const char *comment=line;while(isspace((unsigned char)*comment))comment++;
+        if(!strncmp(comment,"# geosith ",10)){p+=n;continue;}
         if(sscanf(line," section: %63s",section)==1){templates=!strcmp(section,"templates");skip=!strcmp(section,"header")||!strcmp(section,"cogs");if(!strcmp(section,"cogs")&&!wrote){writePlacedCogs(f,m);wrote=1;}if(!strcmp(section,"templates")&&!wrote){writePlacedCogs(f,m);wrote=1;}}
         if(templates&&!strncmp(line,"end",3)){writeCustomTemplates(f,m);templates=0;}
         char templateName[64];if(templates&&sscanf(line,"%63s",templateName)==1&&edTemplateIndex(m,templateName)>=0){p+=n;continue;}
-        if(templates&&!strncmp(line,"world templates",15))fputs("World templates 2048\n",f);else if(!skip)fwrite(p,1,n,f);p+=n;
+        // Models (including terrain atlases) load additional materials after the
+        // JKL list. This is allocation capacity, not the number of textures to load.
+        int materialCapacity;
+        if(!skip&&sscanf(line,"world materials %d",&materialCapacity)==1)fprintf(f,"World materials %d\n",materialCapacity<4096?4096:materialCapacity);
+        else if(templates&&!strncmp(line,"world templates",15))fputs("World templates 2048\n",f);else if(!skip)fwrite(p,1,n,f);p+=n;
     }if(!wrote)writePlacedCogs(f,m);
 }
 static int equalText(const char *a,const char *b){while(*a&&*b){if(tolower((unsigned char)*a++)!=tolower((unsigned char)*b++))return 0;}return *a==*b;}
@@ -88,8 +97,20 @@ int edReadEpisode(EdEpisode *out,const char *text,const char *currentFile){
     }if(!ended||count!=e.count||!edEpisodeValidate(&e))return 0;*out=e;return 1;
 }
 int edReadTextureRotations(EdModel *m,const char *text){
-    for(const char *line=text;line&&*line;line=strchr(line,'\n')){if(*line=='\n')line++;
+    // Older saves copied prior baked-light blocks into the resource manifest.
+    // The last contiguous block is the one written from the current geometry.
+    const char *bakedStart=NULL;int inBaked=0;
+    for(const char *p=text;*p;){const char *end=strchr(p,'\n');
+        int baked=!strncmp(p,"# GeoSith baked light ",21);
+        if(baked&&!inBaked)bakedStart=p;inBaked=baked;
+        if(!end)break;p=end+1;
+    }
+    for(const char *cursor=text;cursor&&*cursor;){
+        // Bound scanf to one line: the Windows CRT measures the whole input string.
+        const char *end=strchr(cursor,'\n');std::string row(cursor,end?(size_t)(end-cursor):strlen(cursor));cursor=end?end+1:nullptr;const char *line=row.c_str();
         int sector,faceIndex;
+        if(sscanf(line,"# GeoSith baked light %d %d",&sector,&faceIndex)==2){if(bakedStart&&cursor&&cursor<=bakedStart)continue;if(sector<0||sector>=m->count||faceIndex<0||faceIndex>=m->c[sector].count)return 0;m->c[sector].f[faceIndex].bakedLight=1;continue;}
+        int light;EdVec color;if(sscanf(line,"# GeoSith light color %d %lf %lf %lf",&light,&color.x,&color.y,&color.z)==4){if(light<0||light>=m->lightCount||!isfinite(color.x)||!isfinite(color.y)||!isfinite(color.z))return 0;m->lights[light].color=color;continue;}
         if(sscanf(line,"# GeoSith custom uv %d %d",&sector,&faceIndex)==2){if(sector<0||sector>=m->count||faceIndex<0||faceIndex>=m->c[sector].count)return 0;m->c[sector].f[faceIndex].customUV=1;continue;}
         if(strncmp(line,"# GeoSith texture rotation ",27))continue;
         int s,f;double angle,u,v,us,vs;
@@ -131,6 +152,8 @@ int edGobAddFile(const char *path,const char *name,const void *data,unsigned int
 }
 static int jkl(FILE *f,const EdModel *m,const char *resources) {
     header(f,&m->header);writeResources(f,m,resources);
+    for(int s=0;s<m->count;s++)for(int p=0;p<m->c[s].count;p++)if(m->c[s].f[p].bakedLight)fprintf(f,"# GeoSith baked light %d %d\n",s,p);
+    for(int i=0;i<m->lightCount;i++)fprintf(f,"# GeoSith light color %d %.9g %.9g %.9g\n",i,m->lights[i].color.x,m->lights[i].color.y,m->lights[i].color.z);
     fprintf(f,"\nSection: Lights\nEditor lights %d\n\n#num:\ttype:\tX:\tY:\tZ:\tintensity:\trange:\n",m->lightCount);
     for(int i=0;i<m->lightCount;i++){const EdLight *l=&m->lights[i];fprintf(f,"%d: %d %.9f %.9f %.9f %.9f %.9f\n",i,l->type,l->position.x,l->position.y,l->position.z,l->intensity,l->range);}fputs("end\n",f);
     int vertices=0,surfaces=0,adjoins=0;
@@ -161,11 +184,11 @@ static int jkl(FILE *f,const EdModel *m,const char *resources) {
     for(int s=0;s<m->count;s++) for(int p=0;p<m->c[s].count;p++) { const EdFace *face=&m->c[s].f[p];
         EdSurfaceAttributes a=edSurfaceAttributes(face);fprintf(f,"%d: %d 0x%x 0x%x %d %d %d %d %.9f %d",index[s][p],face->material,a.surfaceFlags,a.faceFlags,a.geometryMode,m->lightCount?3:a.lightingMode,a.textureMode,adj[s][p],a.extraLight,face->count);
         for(int v=0;v<face->count;v++,k++) fprintf(f," %d,%d",positionIndices[k],k);
-        for(int v=0;v<face->count;v++)fprintf(f," %.9f",edVertexLight(m,s,p,v));fputc('\n',f);
+        for(int v=0;v<face->count;v++){fprintf(f," %.9f",edVertexLight(m,s,p,v));if(face->bakedLight)fprintf(f," %.9f %.9f %.9f",face->v[v].lightRGB.x,face->v[v].lightRGB.y,face->v[v].lightRGB.z);}fputc('\n',f);
     }
     for(int s=0;s<m->count;s++)for(int p=0;p<m->c[s].count;p++){const EdFace *face=&m->c[s].f[p];if(face->uvRotation){EdSurfaceAttributes a=edSurfaceAttributes(face);fprintf(f,"# GeoSith texture rotation %d %d %.17g %.17g %.17g %.17g %.17g\n",s,p,face->uvRotation,face->uOffset,face->vOffset,a.uScale,a.vScale);}}
     for(int s=0;s<m->count;s++)for(int face=0;face<m->c[s].count;face++)if(m->c[s].f[face].customUV)fprintf(f,"# GeoSith custom uv %d %d\n",s,face);
-    for(int i=0;i<m->splineCount;i++){const EdSpline &s=m->splines[i];fprintf(f,"# GeoSith spline %d %d %d %d %.17g %.17g\n",s.id,s.sides,s.segments,s.material,s.width,s.height);if(s.groupId)fprintf(f,"# GeoSith splinegroup %d %d\n",s.id,s.groupId);for(int p=0;p<s.count;p++){const EdSplinePoint &v=s.points[p];fprintf(f,"# GeoSith splinepoint %d %d %.17g %.17g %.17g %.17g %.17g %.17g\n",s.id,p,v.position.x,v.position.y,v.position.z,v.handle.x,v.handle.y,v.handle.z);}}
+    for(int i=0;i<m->splineCount;i++){const EdSpline &s=m->splines[i];fprintf(f,"# GeoSith spline %d %d %d %d %.17g %.17g\n",s.id,s.sides,s.segments,s.material,s.width,s.height);if(s.makeWalkstruct)fprintf(f,"# GeoSith splinewalkstruct %d %s\n",s.id,s.walkstructName[0]?s.walkstructName:"-");if(s.hasSectorTint)fprintf(f,"# GeoSith splinetint %d %.17g %.17g %.17g\n",s.id,s.sectorTint.x,s.sectorTint.y,s.sectorTint.z);if(s.sectorFlagsMask)fprintf(f,"# GeoSith splineflags %d %08x %08x\n",s.id,s.sectorFlags,s.sectorFlagsMask);if(s.groupId)fprintf(f,"# GeoSith splinegroup %d %d\n",s.id,s.groupId);for(int p=0;p<s.count;p++){const EdSplinePoint &v=s.points[p];fprintf(f,"# GeoSith splinepoint %d %d %.17g %.17g %.17g %.17g %.17g %.17g\n",s.id,p,v.position.x,v.position.y,v.position.z,v.handle.x,v.handle.y,v.handle.z);}}
     for(int i=0;i<m->splineCount;i++){EdSpline state=m->splines[i];EdWire measure={NULL,ED_NET_LIMIT/2,0,0,1};edWireSplineState(&measure,&state);if(!measure.ok)return 0;std::vector<unsigned char> bytes(measure.at);EdWire w={bytes.data(),bytes.size(),0,0,1};edWireSplineState(&w,&state);for(size_t offset=0;offset<bytes.size();offset+=128){fprintf(f,"# GeoSith splinestate %d %u ",state.id,(unsigned)offset);for(size_t b=offset;b<bytes.size()&&b<offset+128;b++)fprintf(f,"%02x",bytes[b]);fprintf(f,"\n");}}
     for(int i=0;i<m->splineCount;i++)if(m->splines[i].closed)fprintf(f,"# GeoSith splineclosed %d\n",m->splines[i].id);
     for(int i=0;i<m->splineCount;i++)if(m->splines[i].mirrorAxes)fprintf(f,"# GeoSith splinemirror %d %d\n",m->splines[i].id,m->splines[i].mirrorAxes);

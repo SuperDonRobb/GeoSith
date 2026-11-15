@@ -15,9 +15,10 @@ static char customRegistered[EDITOR_TEMPLATES][64];
 static int customRegisteredCount;
 static unsigned int customRegisteredHashes[EDITOR_TEMPLATES],customDefinitionHashes[EDITOR_TEMPLATES];
 static SithWorld *customRegistryWorld;
+static std::map<std::string,rdModel3*> customOriginalModels;
 static EdBuffer<std::array<char,32>> customModelNames;
 static EdBuffer<unsigned int> customModelHashes,customGeometryHashes;
-static void resetCustomTemplates(void){customRegistryWorld=NULL;customRegisteredCount=0;edZero(customModelNames,0,sizeof(customModelNames));edZero(customModelHashes,0,sizeof(customModelHashes));edZero(customGeometryHashes,0,sizeof(customGeometryHashes));edZero(customRegisteredHashes,0,sizeof(customRegisteredHashes));edZero(customDefinitionHashes,0,sizeof(customDefinitionHashes));}
+static void resetCustomTemplates(void){if(customRegistryWorld==sithWorld_g_pCurrentWorld)for(auto &entry:customOriginalModels)if(entry.second)sithModel_BindEditor(entry.first.c_str(),entry.second);customOriginalModels.clear();customRegistryWorld=NULL;customRegisteredCount=0;edZero(customModelNames,0,sizeof(customModelNames));edZero(customModelHashes,0,sizeof(customModelHashes));edZero(customGeometryHashes,0,sizeof(customGeometryHashes));edZero(customRegisteredHashes,0,sizeof(customRegisteredHashes));edZero(customDefinitionHashes,0,sizeof(customDefinitionHashes));}
 static int templateParameterOrder(const char *key){return !strcmp(key,"type")?0:!strcmp(key,"move")?1:!strcmp(key,"numframes")?2:3;}
 static int customTemplateLine(const EdTemplate *t,char *line,size_t size){
     int n=snprintf(line,size,"%s %s",t->name,t->parent);
@@ -31,9 +32,35 @@ static unsigned int customTemplateHash(const EdModel *source,const char *name){
     unsigned int hash=0;int index=edTemplateIndex(source,name),depth=0;while(index>=0&&depth++<ED_CUSTOM_TEMPLATES){const EdTemplate *t=&source->templates[index];hash=(hash^edNetHash(t,offsetof(EdTemplate,params)+t->count*sizeof(EdTemplateParam)))*16777619u;for(int p=0;p<t->count;p++)if(!strcmp(t->params[p].key,"model3d"))for(int a=0;a<source->assetCount;a++){char file[64];snprintf(file,64,"%s.3do",source->assets[a].name);if(!__strcmpi(file,t->params[p].value))hash=(hash^customAssetHash(source,a))*16777619u;}
         index=edTemplateIndex(source,t->parent);}return hash;
 }
+static int syncSavedModels(const EdModel *source){
+    for(auto it=customOriginalModels.begin();it!=customOriginalModels.end();){
+        int present=0;for(int a=0;a<source->assetCount;a++){char file[64];snprintf(file,64,"%s.3do",source->assets[a].name);if(source->assets[a].saved&&!__strcmpi(file,it->first.c_str()))present=1;}
+        if(!present){if(it->second)sithModel_BindEditor(it->first.c_str(),it->second);for(size_t a=0;a<customModelNames.size();a++)if(!strcmp(customModelNames[a].data(),it->first.c_str()))customModelHashes[a]=0;it=customOriginalModels.erase(it);}else ++it;
+    }
+    for(int a=0;a<source->assetCount;a++)if(source->assets[a].saved){
+        char file[64];snprintf(file,64,"%s.3do",source->assets[a].name);unsigned hash=customAssetHash(source,a);
+        if(!strcmp(customModelNames[a].data(),file)&&customModelHashes[a]==hash&&sithModel_Find(file))continue;
+        unsigned geometryHash=decalAssetHash(source,a)^edNetHash(&source->assets[a],sizeof(EdAsset))^(edPainted(source,a)?0x714bc21u:0);
+        for(int mesh=0;mesh<source->meshCount;mesh++)if(source->meshes[mesh].asset==a)geometryHash=(geometryHash^edCellHash(&source->meshes[mesh].geometry))*16777619u;
+        if(edPainted(source,a)&&!strcmp(customModelNames[a].data(),file)&&customGeometryHashes[a]==geometryHash&&sithModel_Find(file)){
+            EdPaintBake bake;if(!terrainBakeLive(source,a,&bake))return 0;
+        }else{
+            if(!builderCacheFrom(source,a))return 0;rdThing_FreeEntry(&builderThings[a]);
+            rdModel3 *replacement;auto original=customOriginalModels.find(file);
+            if(original==customOriginalModels.end()){
+                rdModel3 *previous=sithModel_Find(file);replacement=sithModel_OverrideEditor(file,&builderModels[a]);if(!replacement)return 0;
+                customOriginalModels[file]=previous;
+            }else replacement=sithModel_ReplaceEditor(file,&builderModels[a]);
+            if(!replacement)return 0;builderHashes[a]=0;sithModel_BindEditor(file,replacement);
+        }
+        customGeometryHashes[a]=geometryHash;snprintf(customModelNames[a].data(),32,"%s",file);customModelHashes[a]=hash;
+    }
+    return 1;
+}
 static int syncCustomTemplates(const EdModel *source){
     SithWorld *world=sithWorld_g_pCurrentWorld;if(!world||!edTemplatesValidate(source))return 0;
     if(customRegistryWorld!=world){resetCustomTemplates();customRegistryWorld=world;}
+    if(!syncSavedModels(source))return 0;
     int changed=0;unsigned char done[ED_CUSTOM_TEMPLATES]={0};
     for(int pass=0;pass<source->templateCount;pass++)for(int i=0;i<source->templateCount;i++)if(!done[i]){
         const EdTemplate *t=&source->templates[i];int parent=edTemplateIndex(source,t->parent);if(parent>=0&&!done[parent])continue;
@@ -123,6 +150,86 @@ static const char *templateDefaultValue(const char *key){
     if(strstr(key,"flags"))return "0x0";
     return "0";
 }
+// Flag meanings follow the engine enums; unassigned bits remain editable.
+static void surfaceFlagDraw(jkGuiElement*,jkGuiMenu*,tVBuffer*,BOOL);
+static const char *templateThingFlags[32]={
+    "Emit light","Destroyed",NULL,"Level geometry",NULL,NULL,"Standable",NULL,
+    "Invulnerable","Dead","Captured by COG","No impact damage","Not on easy","Not on medium","Not on hard",NULL,
+    NULL,"Pulse active","Timer active","Disabled","In camera FOV","Render weapon","Metal footsteps","Dirt footsteps",
+    NULL,"In water","Ignore Gouraud distance","Drowns","Water creature","Makes splashes"};
+static const char *templatePhysicsFlags[32]={
+    "Use gravity","Use thrust",NULL,NULL,"Align to surface","Bounce off surfaces","Stick to floor","Stick to walls",
+    NULL,"Use rotation velocity","Bank when turning",NULL,"Use angular thrust","Fly","Affected by blast force",NULL,
+    "Crouching",NULL,"Partial gravity",NULL,"On water surface",NULL,"Disable thrust"};
+static const char *templateActorFlags[32]={
+    "Rotate head","View centering","Headlight","Invulnerable","View centered","Explode when killed","Breathe underwater","Invisible",
+    "Droid","Boss","Deaf","Blind",NULL,"Bleeds",NULL,"See invisible",
+    "Screaming","Delay fire","Immobile","No underwater firing","Not a target","Controls disabled","Killed by fall","No idle camera",
+    "Full damage","See in dark",NULL,"Freeze movement","Flyer movement (MOTS)","Scope HUD (MOTS)","Electric whip (Jones)","Arachnid (Jones)"};
+static const char *templateWeaponFlags[32]={
+    "No damage to shooter",NULL,"Explode on surface hit","Explode on thing hit",NULL,NULL,NULL,"Attach to surface",
+    "Explode on timeout","Destroyed by damage","Impact sound","Attach to thing","Proximity explosion","Instant impact","Damage decay","Object trail",
+    NULL,NULL,"Decay alerts AI","Ricochet off surface",NULL,"Alert targeted AI","Destroy on actor kill","Mophia bomb (Jones)"};
+static const char *templateItemFlags[32]={"Respawn in multiplayer","Respawn in single player","Backpack"};
+static const char *templateExplosionFlags[32]={"Animated sprite","Blast phase","Damage in blast radius","Child explosion","Variable light",NULL,"No damage to shooter","Random debris","Blinding flash","Animate debris material","Update debris material",NULL,"Use fade time"};
+static const char *templateParticleFlags[32]={"Expand outward","Animate cel","Random starting cel","Fade over time","Emit light","Random cel changes","Timeout rate"};
+static const char *templateUnknownFlags[32]={0};
+static int templateIsFlags(const char *key){return !strcmp(key,"thingflags")||!strcmp(key,"physflags")||!strcmp(key,"typeflags");}
+static const char **templateFlagLabels(const EdTemplate &draft,const char *key){
+    if(!strcmp(key,"thingflags"))return templateThingFlags;
+    if(!strcmp(key,"physflags"))return templatePhysicsFlags;
+    static const char *types[]={"free","camera","actor","weapon","debris","item","explosion","cog","ghost","corpse","player","particle"};
+    SithThing *base=sithTemplate_GetTemplate(draft.parent);int type=base?base->type:SITH_THING_FREE;
+    for(int i=0;i<draft.count;i++)if(!strcmp(draft.params[i].key,"type")){
+        type=SITH_THING_FREE;for(int j=0;j<12;j++)if(!strcmp(draft.params[i].value,types[j])){type=j;break;}
+    }
+    switch(type){case SITH_THING_ACTOR:case SITH_THING_PLAYER:return templateActorFlags;
+    case SITH_THING_WEAPON:return templateWeaponFlags;case SITH_THING_ITEM:return templateItemFlags;
+    case SITH_THING_EXPLOSION:return templateExplosionFlags;case SITH_THING_PARTICLE:return templateParticleFlags;default:return templateUnknownFlags;}
+}
+static int templateFlagsTestAction;
+static void templateFlagsTestMenu(jkGuiMenu *menu){
+    menu->paElements[1].boxChecked=1;menu->paElements[23].boxChecked=0;menu->paElements[24].boxChecked=1;
+    menu->lastClicked=templateFlagsTestAction;
+}
+static void templateFlagsMenu(const EdTemplate &draft,EdTemplateParam &param){
+    const char **names=templateFlagLabels(draft,param.key);
+    // Template flag parameters use hexadecimal even without a 0x prefix.
+    unsigned int flags=(unsigned int)strtoul(param.value,NULL,16);
+    jkGuiElement e[36]={0};char16_t title[96],labels[32][96];char text[96];
+    snprintf(text,sizeof(text),"Template %s",param.key);stdString_CharToWchar(title,text,96);
+    e[0]=jkGuiElement{ELEMENT_TEXT,0,2,NULL,3,{20,8,600,40},1};
+    for(int bit=0;bit<32;bit++){
+        if(names[bit])snprintf(text,sizeof(text),"%s",names[bit]);else snprintf(text,sizeof(text),"Unknown / unused 0x%08X",1u<<bit);
+        stdString_CharToWchar(labels[bit],text,96);
+        e[bit+1]=jkGuiElement{ELEMENT_CHECKBOX,100+bit,0,NULL,(flags&(1u<<bit))!=0,{18+(bit/16)*310,56+(bit%16)*21,302,20},1};
+        e[bit+1].drawFuncOverride=surfaceFlagDraw;
+    }
+    e[33]=jkGuiElement{ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,430,230,36},1};
+    e[34]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,430,230,36},1};e[35].type=ELEMENT_END;
+    jkGuiMenu menu={e,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);
+    e[0].wstr=title;for(int bit=0;bit<32;bit++)e[bit+1].wstr=labels[bit];e[33].wstr=u"Accept";
+    jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&e[34]);jkGuiRend_MenuSetReturnKeyShortcutElement(&menu,&e[33]);
+    if(templateFlagsTestAction)menu.idkFunc=templateFlagsTestMenu;
+    if(jkGuiRend_DisplayAndReturnClicked(&menu)==1){flags=0;for(int bit=0;bit<32;bit++)if(e[bit+1].boxChecked)flags|=1u<<bit;snprintf(param.value,128,"0x%X",flags);}
+    freeMenuStrings(e);
+}
+
+static int templateFlagsSelfTest(void){
+    EdTemplate draft={0};strcpy(draft.parent,"_walkstruct");draft.count=1;
+    EdTemplateParam &p=draft.params[0];strcpy(p.key,"thingflags");strcpy(p.value,"80400048");
+    BuilderMenuState state=builderMenuBegin();templateFlagsTestAction=-1;templateFlagsMenu(draft,p);
+    int ok=!strcmp(p.value,"80400048");templateFlagsTestAction=1;templateFlagsMenu(draft,p);
+    ok=ok&&!strcmp(p.value,"0x80800049");templateFlagsTestAction=0;builderMenuEnd(state);
+    ok=ok&&templateFlagLabels(draft,"thingflags")==templateThingFlags&&templateFlagLabels(draft,"physflags")==templatePhysicsFlags;
+    strcpy(p.key,"type");strcpy(p.value,"actor");ok=ok&&templateFlagLabels(draft,"typeflags")==templateActorFlags;
+    strcpy(p.value,"weapon");ok=ok&&templateFlagLabels(draft,"typeflags")==templateWeaponFlags;
+    strcpy(p.value,"item");ok=ok&&templateFlagLabels(draft,"typeflags")==templateItemFlags;
+    strcpy(p.value,"explosion");ok=ok&&templateFlagLabels(draft,"typeflags")==templateExplosionFlags;
+    strcpy(p.value,"particle");ok=ok&&templateFlagLabels(draft,"typeflags")==templateParticleFlags;
+    draft.count=0;ok=ok&&templateFlagLabels(draft,"typeflags")==templateUnknownFlags;
+    printf("GEOSITH_TEMPLATE_FLAGS %s: accept/cancel, hex values, unknown bits, type-specific labels\n",ok?"PASS":"FAIL");return ok;
+}
 static void templateEditMenu(int editing){
     EdTemplate draft={0};snprintf(draft.parent,64,"%s",sithTemplate_GetTemplate("_decor")?"_decor":"none");
     for(int n=1;n<10000;n++){snprintf(draft.name,64,"custom%d",n);if(!sithTemplate_GetTemplate(draft.name))break;}
@@ -132,7 +239,7 @@ static void templateEditMenu(int editing){
     for(;;){jkGuiElement e[38]={0};char16_t name[64],parent[64],keys[8][32],values[8][128];stdString_CharToWchar(name,draft.name,64);stdString_CharToWchar(parent,draft.parent,64);
         e[0]=jkGuiElement{ELEMENT_TEXT,0,2,NULL,3,{20,4,600,34},1};e[1]=jkGuiElement{ELEMENT_TEXTBOX,0,0,NULL,63,{140,42,470,28},1};e[2]=jkGuiElement{ELEMENT_TEXTBUTTON,4,0,NULL,3,{140,76,470,28},1};
         e[3]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{20,42,115,28},1};e[4]=jkGuiElement{ELEMENT_TEXTBUTTON,4,0,NULL,3,{20,76,115,28},1};
-        for(int i=0;i<8;i++){int id=page*8+i,visible=id<draft.count;int y=116+i*31;e[5+i*3]=jkGuiElement{ELEMENT_TEXTBUTTON,100+i,0,NULL,3,{20,y,170,28},visible};e[6+i*3]=jkGuiElement{ELEMENT_TEXTBOX,0,0,NULL,127,{192,y,380,28},visible};e[7+i*3]=jkGuiElement{ELEMENT_TEXTBUTTON,200+i,0,NULL,3,{580,y,38,28},visible};if(visible){if(!strcmp(draft.params[id].key,"model3d")){e[6+i*3]=jkGuiElement{ELEMENT_TEXTBUTTON,100+i,0,NULL,3,{192,y,380,28},visible};}stdString_CharToWchar(keys[i],draft.params[id].key,32);stdString_CharToWchar(values[i],draft.params[id].value,128);}}
+        for(int i=0;i<8;i++){int id=page*8+i,visible=id<draft.count;int y=116+i*31;e[5+i*3]=jkGuiElement{ELEMENT_TEXTBUTTON,100+i,0,NULL,3,{20,y,170,28},visible};e[6+i*3]=jkGuiElement{ELEMENT_TEXTBOX,0,0,NULL,127,{192,y,380,28},visible};e[7+i*3]=jkGuiElement{ELEMENT_TEXTBUTTON,200+i,0,NULL,3,{580,y,38,28},visible};if(visible){if(!strcmp(draft.params[id].key,"model3d")||templateIsFlags(draft.params[id].key)){e[6+i*3]=jkGuiElement{ELEMENT_TEXTBUTTON,100+i,0,NULL,3,{192,y,380,28},visible};}stdString_CharToWchar(keys[i],draft.params[id].key,32);stdString_CharToWchar(values[i],draft.params[id].value,128);}}
         e[29]=jkGuiElement{ELEMENT_TEXTBUTTON,1,2,NULL,3,{20,372,170,34},1};e[30]=jkGuiElement{ELEMENT_TEXTBUTTON,2,2,NULL,3,{200,372,110,34},1};e[31]=jkGuiElement{ELEMENT_TEXTBUTTON,3,2,NULL,3,{320,372,110,34},1};e[32]=jkGuiElement{ELEMENT_TEXTBUTTON,5,2,NULL,3,{440,372,180,34},1};e[33]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{230,425,180,36},1};e[34]=jkGuiElement{ELEMENT_TEXTBUTTON,6,2,NULL,3,{440,425,180,36},editing>=0};e[35].type=ELEMENT_END;
         jkGuiMenu menu={e,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);e[0].wstr=u"Template Creator";e[1].wstr=name;e[2].wstr=parent;e[3].wstr=u"Name";e[4].wstr=u"Base template";
         for(int i=0;i<8;i++){e[5+i*3].wstr=keys[i];e[6+i*3].wstr=values[i];e[7+i*3].wstr=u"-";}
@@ -147,16 +254,26 @@ static void templateEditMenu(int editing){
             if(netEditPending())continue;remember();edCopyModel(candidate,model);{--candidate->templateCount;for(int shift=editing;shift<candidate->templateCount;shift++)candidate->templates[shift]=std::move(candidate->templates[shift+1]);}
             if(commit()){say("Custom template deleted. Ctrl+Z: undo.");break;}continue;
         }
-        if(action==1&&draft.count<ED_TEMPLATE_PARAMS){char names[100][128];int count=0;const char *key;while(count<100&&(key=sithThing_TemplateParameter(count))){snprintf(names[count++],128,"%s",key);}int id=templateChoose(u"Add Template Parameter",names,count);if(id>=0){EdTemplateParam *p=&draft.params[draft.count++];snprintf(p->key,32,"%s",names[id]);snprintf(p->value,128,"%s",templateDefaultValue(p->key));page=(draft.count-1)/8;if(!strcmp(p->key,"model3d"))templateModelBrowser(p->value);}}
+        if(action==1&&draft.count<ED_TEMPLATE_PARAMS){char names[100][128];int count=0;const char *key;while(count<100&&(key=sithThing_TemplateParameter(count))){snprintf(names[count++],128,"%s",key);}int id=templateChoose(u"Add Template Parameter",names,count);if(id>=0){EdTemplateParam *p=&draft.params[draft.count++];snprintf(p->key,32,"%s",names[id]);snprintf(p->value,128,"%s",templateDefaultValue(p->key));
+            if(!strcmp(p->key,"thingflags")){SithThing *base=sithTemplate_GetTemplate(draft.parent);if(base)snprintf(p->value,128,"0x%X",base->flags);}
+            page=(draft.count-1)/8;if(!strcmp(p->key,"model3d"))templateModelBrowser(p->value);else if(templateIsFlags(p->key))templateFlagsMenu(draft,*p);}}
         else if(action==2){if(page)page--;}else if(action==3){if((page+1)*8<draft.count)page++;}
         else if(action==4){int id=templateChoose(u"Base Template",templateNames,templateCount);if(id>=0)snprintf(draft.parent,64,"%s",templateNames[id]);}
-        else if(action>=100&&action<108){int id=page*8+action-100;if(id<draft.count&&!strcmp(draft.params[id].key,"model3d"))templateModelBrowser(draft.params[id].value);}
+        else if(action>=100&&action<108){int id=page*8+action-100;if(id<draft.count){if(!strcmp(draft.params[id].key,"model3d"))templateModelBrowser(draft.params[id].value);else if(templateIsFlags(draft.params[id].key))templateFlagsMenu(draft,draft.params[id]);}}
         else if(action>=200&&action<208){int id=page*8+action-200;if(id<draft.count){memmove(draft.params+id,draft.params+id+1,(--draft.count-id)*sizeof(EdTemplateParam));if(page&&page*8>=draft.count)page--;}}
         else if(action==5){
             for(char *p=draft.name;*p;p++)*p=(char)tolower((unsigned char)*p);for(char *p=draft.parent;*p;p++)*p=(char)tolower((unsigned char)*p);
             if(netEditPending()){jkGuiDialog_ErrorDialog(u"Template",u"The host is still checking an edit. Please retry shortly.");continue;}
             int existing=edTemplateIndex(model,draft.name);if((existing<0&&model->templateCount>=ED_CUSTOM_TEMPLATES)||(existing<0&&sithTemplate_GetTemplate(draft.name))){jkGuiDialog_ErrorDialog(u"Template",u"Use a new name or an existing custom template name. Game templates cannot be overwritten.");continue;}
-            edCopyModel(candidate,model);candidate->templates[existing>=0?existing:candidate->templateCount++]=draft;char line[16384];
+            edCopyModel(candidate,model);
+            // Older documents captured inherited flags as per-instance overrides.
+            // Release those default snapshots when explicitly editing template flags.
+            SithThing *oldDefinition=sithTemplate_GetTemplate(draft.name),*parentDefinition=sithTemplate_GetTemplate(draft.parent);
+            for(int p=0;p<draft.count;p++)if(!strcmp(draft.params[p].key,"thingflags"))for(int o=0;o<candidate->objectCount;o++){
+                EdObject &object=candidate->objects[o];if(strcmp(object.templateName,draft.name)||!object.attributes.hasFlags)continue;
+                if((oldDefinition&&object.attributes.flags==oldDefinition->flags)||(parentDefinition&&object.attributes.flags==parentDefinition->flags))object.attributes.hasFlags=0;
+            }
+            candidate->templates[existing>=0?existing:candidate->templateCount++]=draft;char line[16384];
             if(!edTemplatesValidate(candidate)||!customTemplateLine(&draft,line,sizeof(line))||(strcmp(draft.parent,"none")&&!sithTemplate_GetTemplate(draft.parent))){jkGuiDialog_ErrorDialog(u"Template",u"Use an existing base, a simple unique name, and nonempty parameter values without spaces. Vectors use (x/y/z).");continue;}
             remember();if(!commit()){jkGuiDialog_ErrorDialog(u"Template",u"Could not create template. Check its type, base and resource names.");continue;}
             for(int i=0;i<templateCount;i++)if(!strcmp(templateNames[i],draft.name))currentTemplate=i;say("Template saved. Weapon 3 can now place it. Save Level packages templates and custom 3DOs.");break;
@@ -171,6 +288,18 @@ static void templateCreatorMenu(void){
 }
 
 // Terrain inherits walkstruct collision flags, but uses earth footsteps.
+static void destructibleTemplateTimers(EdModel *draft){
+    // Upgrade only debris explicitly referenced by our generated wall COG.
+    for(int c=0;c<draft->cogCount;c++){
+        const EdPlacedCog &cog=draft->cogs[c];if(__strcmpi(cog.file,"gs_destructible.cog"))continue;
+        for(int p=0;p<cog.count;p++){
+            const EdCogParam &param=cog.params[p];if(param.type!=ED_COG_TEMPLATE||strncmp(param.name,"debris",6))continue;
+            int t=edTemplateIndex(draft,param.value);if(t<0)continue;
+            EdTemplate &entry=draft->templates[t];
+            for(int j=0;j<entry.count;j++)if(!__strcmpi(entry.params[j].key,"timer")&&!strcmp(entry.params[j].value,"8"))strcpy(entry.params[j].value,"4");
+        }
+    }
+}
 static void terrainTemplateFlags(EdModel *draft){
     for(int a=0;a<draft->assetCount;a++)if(draft->assets[a].terrain){int t=edTemplateIndex(draft,draft->assets[a].name);if(t<0)continue;EdTemplate &entry=draft->templates[t];int p=0;for(;p<entry.count;p++)if(!__strcmpi(entry.params[p].key,"thingflags"))break;
         SithThing *base=sithTemplate_GetTemplate(entry.parent);unsigned flags=base?base->flags:0x400048;

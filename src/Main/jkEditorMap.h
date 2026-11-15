@@ -13,6 +13,24 @@ static double mapZoom,mapX,mapY,mapStartX,mapStartY;
 static int mapWidth=640,mapHeight=480,mapLeft,mapRight,mapCopyDown,mapPasteDown,mapHistoryDown,mapBox,mapDragging;
 static uint32_t mapMoveType;
 static int mapGeometryDrag;
+static int mapClickTracking,mapClickReady,mapClickConsumed;
+static uint32_t mapClickTime;
+static double mapClickX,mapClickY;
+/* Only stationary selection clicks count; drawing and dragging keep their own gestures. */
+static int mapDeselectClick(int left,int blocked,uint32_t now){
+    if(mapClickConsumed){if(!left)mapClickConsumed=0;return 1;}
+    if(blocked){mapClickTracking=mapClickReady=0;return 0;}
+    if(left&&!mapLeft){
+        if(mapClickReady&&now-mapClickTime<=300&&hypot(mapX-mapClickX,mapY-mapClickY)<=4){
+            mapSelected.clear();sectorPicks.clear();picks.count=0;splineSelected=0;splinePoint=-1;mapBox=0;
+            mapClickTracking=mapClickReady=0;mapClickConsumed=1;say("Selection cleared.");return 1;
+        }
+        mapClickReady=0;mapClickTracking=1;mapClickTime=now;mapClickX=mapX;mapClickY=mapY;
+    }
+    if(mapClickTracking&&hypot(mapX-mapClickX,mapY-mapClickY)>4)mapClickTracking=0;
+    if(!left&&mapLeft){mapClickReady=mapClickTracking&&now-mapClickTime<=300;mapClickTracking=0;}
+    return 0;
+}
 
 static int mapMirrorAxes,mapMiddleDown;
 static int mapMirrorCandidate(void){if(!mapMirrorAxes)return 1;EdModel mirrored;if(!edMirrorEdit(&mirrored,mapDragging?snapshot:model,candidate,mapMirrorAxes)){say("Mirrored edit rejected: could not create valid convex geometry.");return 0;}*candidate=std::move(mirrored);return 1;}
@@ -118,24 +136,44 @@ static int mapSplineGeometrySelected(void){
     for(int s=0;s<model->count;s++)if(mapSelected[s]&&model->c[s].splineId){say("Editable spline: use its menu to Convert to Sectors before editing geometry.");return 1;}
     for(int i=0;i<picks.count;i++){int s=picks.hits[i].cell;if(s>=0&&s<model->count&&model->c[s].splineId){say("Editable spline: use its menu to Convert to Sectors before editing geometry.");return 1;}}return 0;
 }
+static int mapSelectedSurface(const EdHit &h){
+    return h.cell>=0&&h.cell<model->count&&h.face>=0&&h.face<model->c[h.cell].count&&h.vertex<0&&h.edge<0;
+}
+static int mapSurfaceCutCount(EdVec a,EdVec b){
+    EdVec n=edCross(mapN(),edSub(b,a));double len=sqrt(edDot(n,n));if(len<ED_EPS)return 0;n=edScale(n,1/len);int count=0;
+    for(int i=0;i<picks.count;i++)if(mapSelectedSurface(picks.hits[i])){
+        const EdFace &f=model->c[picks.hits[i].cell].f[picks.hits[i].face];int positive=0,negative=0;
+        for(int v=0;v<f.count;v++){double d=edDot(n,edSub(f.v[v].p,a));positive|=d>ED_EPS;negative|=d<-ED_EPS;}count+=positive&&negative;
+    }return count;
+}
 static void mapBeginCleave(void){
     if(mapSplineGeometrySelected())return;
     if(netEditPending()||mapDragging){say("Finish the current edit before cleaving sectors.");return;}
-    int count=0;for(int s=0;s<model->count;s++)count+=mapSelected[s]!=0;if(!count){say("Select sectors, then press C to cleave.");return;}
-    mapCancel();mapCleaveMode=1;say("Cleave: click and drag a line across selected sectors, or click two endpoints. Escape cancels.");
+    int count=0;for(int s=0;s<model->count;s++)count+=mapSelected[s]!=0;for(int i=0;i<picks.count;i++)count+=mapSelectedSurface(picks.hits[i]);if(!count){say("Select sectors or surfaces, then press C to cleave.");return;}
+    mapCancel();mapCleaveMode=1;say("Cleave: click and drag a line across selected sectors or surfaces, or click two endpoints. Escape cancels.");
 }
 static int mapCutMask(EdVec a,EdVec b,EdBuffer<unsigned char> &cut){
     EdModel projected={};projected.count=model->count;for(int s=0;s<model->count;s++)projected.c[s]=mapProjectedCell(model->c[s]);return edMapCutMask(&projected,mapSelected,mapProject(a),mapProject(b),cut);
 }
 static int mapCleave(EdVec a,EdVec b,EdBuffer<unsigned char> &selected){
-    EdBuffer<unsigned char> cut;if(!mapCutMask(a,b,cut))return 0;edCopyModel(candidate,model);EdVec direction=edSub(b,a),normal=edCross(mapN(),direction);
-    if(!edCleaveSectorsPlane(candidate,cut,normal,a))return 0;selected.clear();for(int s=0;s<candidate->count;s++)selected[s]=edMapInsideSelected(model,mapSelected,edMapCenter(&candidate->c[s]));return 1;
+    EdBuffer<unsigned char> cut;int sectors=mapCutMask(a,b,cut);if(!sectors&&!mapSurfaceCutCount(a,b))return 0;
+    edCopyModel(candidate,model);EdVec normal=edCross(mapN(),edSub(b,a));int changed=0;
+    std::vector<std::pair<int,int>> handled;
+    for(int i=0;i<picks.count;i++)if(mapSelectedSurface(picks.hits[i])){
+        EdHit h=picks.hits[i];std::pair<int,int> key(h.cell,h.face);
+        if(std::find(handled.begin(),handled.end(),key)!=handled.end())continue;
+        const EdFace &face=model->c[h.cell].f[h.face];handled.push_back(key);if(face.neighbor>=0)handled.emplace_back(face.neighbor,face.mirror);
+        changed|=edCleaveFacePlane(candidate,h.cell,h.face,normal,a);
+    }
+    if(sectors){if(!edCleaveSectorsPlane(candidate,cut,normal,a))return 0;changed=1;}
+    if(!changed||!edValidate(candidate))return 0;
+    selected.clear();for(int s=0;s<candidate->count;s++)selected[s]=edMapInsideSelected(model,mapSelected,edMapCenter(&candidate->c[s]));return 1;
 }
 static int mapFinishCleave(EdVec end){
     EdBuffer<unsigned char> selected;
     if(netEditPending()){say("Wait for the host before cleaving sectors.");return 0;}
-    if(!mapCleave(mapCleaveStartPoint,end,selected)){say("Cleave not placed: draw through selected sectors; keep two valid convex halves.");return 0;}
-    remember();if(!commit())return 0;edCopy(mapSelected,selected,sizeof(mapSelected));mapCancel();say("Selected sectors cleaved with connecting adjoins. Ctrl+Z: undo.");return 1;
+    if(!mapCleave(mapCleaveStartPoint,end,selected)){say("Cleave not placed: draw through selected surfaces or sectors; keep two valid convex halves.");return 0;}
+    remember();if(!commit())return 0;edCopy(mapSelected,selected,sizeof(mapSelected));mapCancel();say("Selected geometry cleaved; adjoin sides stay connected. Ctrl+Z: undo.");return 1;
 }
 static int mapDeleteSelected(SithThing *player){
     if(mapSplineGeometrySelected())return 0;
@@ -151,6 +189,7 @@ static void mapStopPlayer(SithThing *p){
     rdVector_Zero3(&p->physicsParams.deltaVelocity);rdVector_Zero3(&p->physicsParams.angularVelocity);
 }
 static void mapOpen(SithThing *p){
+    mapClickTracking=mapClickReady=mapClickConsumed=0;
     mapMiddleDown=stdControl_ReadKey(KEY_MOUSE_B3,NULL)!=0;mapView=0;mapSize();mapCenter=vec(p->position);mapZoom=fmin(mapWidth,mapHeight)/3.0;mapX=mapWidth*.5;mapY=mapHeight*.5;
     mapMoveType=p->moveType;if(p->attach_flags)sithThing_DetachThing(p);mapStopPlayer(p);
     mapActive=1;mapCancel();grabbing=groupGrab=cleaving=objectGrabbing=objectRotating=lightGrabbing=0;
@@ -196,6 +235,7 @@ static void mapInput(double dx,double dy,int wheel,int left,int right,int space,
     if(history&&!mapHistoryDown&&!busy&&!mapDragging){historyStep(history==2);mapInvalidate();}
     if(copy&&!mapCopyDown)mapCopy();
     if(paste&&!mapPasteDown&&!mapDragging)mapBeginPlacement();
+    if(mapDeselectClick(left,right||space||additive||copy||paste||history||wheel||mapCleaveMode||mapDrawing||mapUnplaced||splineDrawing,stdPlatform_GetTimeMsec()))goto buttons;
     if(!mapCleaveMode&&!mapDrawing&&!mapUnplaced&&splineMapInput(left,right,space))goto buttons;
     if(mapCleaveMode){
         EdVec end=mapSnapXY(mapPoint(mapX,mapY));
@@ -290,7 +330,7 @@ static void mapDraw(void){
         else for(int v=0;v<face->count;v++)if(h.edge<0||h.edge==v){mapWorldLine(face->v[v].p,face->v[(v+1)%face->count].p,selected,3);mapMarker(face->v[v].p,0,selected);mapMarker(face->v[(v+1)%face->count].p,0,selected);}
     }
     int previewColor=mapColor(255,224,64);
-    if(mapCleaveMode==2){EdVec end=mapSnapXY(mapPoint(mapX,mapY));EdBuffer<unsigned char> cut;int valid=mapCutMask(mapCleaveStartPoint,end,cut)>0;
+    if(mapCleaveMode==2){EdVec end=mapSnapXY(mapPoint(mapX,mapY));EdBuffer<unsigned char> cut;int valid=(mapCutMask(mapCleaveStartPoint,end,cut)>0||mapSurfaceCutCount(mapCleaveStartPoint,end)>0);
         mapWorldLine(mapCleaveStartPoint,end,valid?previewColor:selected,3);mapMarker(mapCleaveStartPoint,1,previewColor);mapMarker(end,0,valid?previewColor:selected);
     }
     if(mapUnplaced){EdVec delta=mapPlacementDelta();for(int s=0;s<mapPending->count;s++)for(int f=0;f<mapPending->c[s].count;f++){EdFace *face=&mapPending->c[s].f[f];for(int v=0;v<face->count;v++)for(int mask=0;mask<8;mask++)if((mask&mapMirrorAxes)==mask)mapWorldLine(edMirrorPoint(edAdd(face->v[v].p,delta),mask),edMirrorPoint(edAdd(face->v[(v+1)%face->count].p,delta),mask),previewColor,3);}}
@@ -340,6 +380,11 @@ static int mapSelfTest(SithThing *p){
     EdModel *saved=edAlloc(sizeof(*saved)),*savedSnapshot=edAlloc(sizeof(*savedSnapshot));if(!saved||!savedSnapshot){edFree(saved);edFree(savedSnapshot);return 0;}edCopyModel(saved,model);edCopyModel(savedSnapshot,snapshot);EdSelection old=picks;uint32_t movement=p->moveType;rdVector3 position=p->position;
     clearHistory();picks.count=1;picks.hits[0]=EdHit{0,0,0,-1};mapOpen(p);
     int retained=picks.count==1&&picks.hits[0].vertex==0&&!mapSelected[0];mapClose(p);retained=retained&&picks.count==1;
+    mapLeft=0;mapDeselectClick(1,0,1000);mapLeft=1;mapDeselectClick(0,0,1010);mapLeft=0;
+    mapSelected[0]=sectorPicks[0]=1;splineSelected=123;splinePoint=0;
+    retained=retained&&mapDeselectClick(1,0,1100)&&!picks.count&&!mapSelected[0]&&!sectorPicks[0]&&!splineSelected&&splinePoint==-1;
+    mapLeft=1;retained=retained&&mapDeselectClick(0,0,1110);mapLeft=0;
+    picks.count=1;
     picks.hits[0]=EdHit{0,4,-1,-1};mapOpen(p);retained=retained&&picks.count==1&&picks.hits[0].face==4&&!mapSelected[0];
     picks.count=0;mapCenter=edMapCenter(&model->c[0]);mapZoom=fmin(mapWidth,mapHeight)/8.0;mapLeft=mapRight=0;
     /* Pick a complete XY vertex column and edge, drag through the real map
@@ -403,6 +448,25 @@ static int mapSelfTest(SithThing *p){
     mapSelected.clear();for(int s=0;s<model->count;s++)mapSelected[s]=1;int history=undoCount;ok=ok&&!mapDeleteSelected(p)&&undoCount==history;
     edZero(mapSelected,0,sizeof(mapSelected));mapSelected[model->count-1]=1;
     ok=ok&&mapDeleteSelected(p)&&model->count==saved->count&&historyStep(0)&&model->count==saved->count+1&&historyStep(1)&&model->count==saved->count&&historyStep(0)&&historyStep(0);
+    // Solid face selections use the same projected cut plane in every view,
+    // splitting only selected polygons while retaining the sector volume.
+    for(int view=0;view<6&&ok;view++){
+        edCopyModel(candidate,saved);ok=commit();clearHistory();mapSelected.clear();picks.count=2;
+        picks.hits[0]=EdHit{0,0,-1,-1};picks.hits[1]=EdHit{0,1,-1,-1};mapView=view;
+        int faces=model->c[0].count;EdVec center=edMapCenter(&model->c[0]);mapBeginCleave();ok=ok&&mapCleaveMode==1;
+        mapCleaveStartPoint=edSub(center,edScale(mapV(),3));
+        ok=ok&&mapFinishCleave(edAdd(center,edScale(mapV(),3)))&&model->count==saved->count&&model->c[0].count==faces+2;
+        ok=ok&&historyStep(0)&&model->c[0].count==faces&&historyStep(1)&&model->c[0].count==faces+2;
+    }
+    mapView=0;
+    // Selected portals cleave both sides, not either sector's volume.
+    edCopyModel(candidate,saved);ok=ok&&edExtrudeStep(candidate,0,4)&&commit();clearHistory();mapSelected.clear();picks.count=1;picks.hits[0]=EdHit{0,4,-1,-1};
+    int portalNeighbor=model->c[0].f[4].neighbor,portalMirror=model->c[0].f[4].mirror;
+    int facesBefore=model->c[0].count,sectorsBefore=model->count;mapBeginCleave();ok=ok&&mapCleaveMode==1;
+    mapCleaveStartPoint=edV(0,-2,0);ok=ok&&mapFinishCleave(edV(0,2,0))&&model->count==sectorsBefore&&model->c[0].count==facesBefore+1;
+    if(ok){const EdFace &other=model->c[portalNeighbor].f[portalMirror];ok=other.neighbor==0&&other.mirror==4;}
+    ok=ok&&historyStep(0)&&model->c[0].count==facesBefore&&historyStep(1)&&model->c[0].count==facesBefore+1;
+    edCopyModel(candidate,saved);ok=ok&&commit();clearHistory();picks.count=0;
     EdVec before=mapPoint(mapX,mapY);mapInput(0,0,2,0,0,0,0,0,0,0);EdVec after=mapPoint(mapX,mapY);ok=ok&&edDot(edSub(before,after),edSub(before,after))<1e-10;
     double center=mapCenter.x;mapInput(20,0,0,0,0,1,0,0,0,0);ok=ok&&mapCenter.x<center;
     mapClose(p);ok=ok&&!mapActive&&p->moveType==movement&&rdVector_Dist3(&position,&p->position)<.001;
@@ -457,6 +521,17 @@ static int placedEditingSelfTest(void){
 }
 
 static int splineSelfTest(SithThing *player){
+    if(getenv("GEOSITH_SPLINE_WALKSTRUCT_TEST")){
+        clearHistory();EdSpline draft={};draft.id=1;draft.count=2;draft.sides=4;draft.segments=4;draft.width=draft.height=.25;
+        draft.points[0]={edV(0,-.5,.5),edV(0,.25,0)};draft.points[1]={edV(0,.5,.5),edV(0,.25,0)};
+        if(!splinePublish(draft))return 0;splineSelected=1;splinePoint=-1;EdModel before=*model;
+        splineAttributes();if(!model->splines[0].makeWalkstruct||model->splines[0].invalid||model->assetCount!=before.assetCount+1)return 0;
+        SithThing *definition=sithTemplate_GetTemplate(model->splines[0].walkstructName);
+        if(!definition||!definition->renderData.model3||definition->renderData.model3->aGeos[0].numMeshes<1)return 0;
+        EdModel after=*model;if(!historyStep(0)||!edModelsEqual(model,&before)||!historyStep(1)||!edModelsEqual(model,&after))return 0;
+        draft=model->splines[0];draft.points[1].position.x+=.125;if(!splinePublish(draft)||model->splines[0].invalid)return 0;
+        puts("GEOSITH_SPLINE_WALKSTRUCT PASS: menu checkbox, live model/template, editable controls and undo/redo");fflush(stdout);return 1;
+    }
     clearHistory();mapOpen(player);mapCenter=edV(4,2,0);mapZoom=80;mapLeft=mapRight=0;
     int originalCount=model->count;
     splineBegin(edV(4,0,.5));if(model->splineCount!=1)return 0;
@@ -472,6 +547,13 @@ static int splineSelfTest(SithThing *player){
     if(model->splineCount!=1||model->splines[0].count!=2||model->count<=originalCount)return 0;
     mapInput(200,-40,0,1,0,0,0,0,0,0);mapInput(0,0,0,0,0,0,0,0,0,0);mapEscape();
     if(splineDrawing||model->splines[0].count!=3)return 0;
+    if(getenv("GEOSITH_SPLINE_FLAGS_TEST")){
+        splinePoint=-1;EdModel before=*model;splineAttributes();
+        if(model->splines[0].sectorFlags!=1||model->splines[0].sectorFlagsMask!=1)return 0;
+        for(int c=0;c<model->count;c++)if(model->c[c].splineId&&(!(model->c[c].flags&1)||fabs(model->c[c].tint.y-.2)>.00001))return 0;
+        EdModel after=*model;if(!historyStep(0)||!edModelsEqual(model,&before)||!historyStep(1)||!edModelsEqual(model,&after))return 0;
+        puts("GEOSITH_SPLINE_FLAGS PASS: attributes button, flag checkbox, all generated sectors and undo/redo");fflush(stdout);return 1;
+    }
     if(getenv("GEOSITH_SPLINE_MENU_CAPTURE")){int old=model->splines[0].material;splinePoint=-1;splineAttributes();if(getenv("GEOSITH_MATERIAL_CAPTURE")){if(model->splines[0].material==old)return 0;for(int c=0;c<model->count;c++)if(model->c[c].splineId==model->splines[0].id)for(int f=0;f<model->c[c].count;f++)if(model->c[c].f[f].material!=model->splines[0].material)return 0;}}
     EdModel before;edCopyModel(&before,model);
     mapX=mapWidth*.5;mapY=mapHeight*.5-80;
