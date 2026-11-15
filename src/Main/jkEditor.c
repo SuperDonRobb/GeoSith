@@ -6,6 +6,7 @@ extern "C" {
 #include "edPngMat.h"
 #include "jkEditorResources.h"
 #include <map>
+#include <memory>
 #include <tuple>
 #include <unordered_map>
 #include <set>
@@ -504,8 +505,9 @@ static void drawMaterialPreview(tVBuffer *buffer,int material,int x,int y,int wi
     rdColor24 *colors=mat->palette_alloc?mat->palette_alloc:colormapColors(materialColormap[material]);
     int lut[256];for(int i=0;i<256;i++)lut[i]=palettePixel(buffer,colors[i].r,colors[i].g,colors[i].b);
     int checker[2]={palettePixel(buffer,30,30,30),palettePixel(buffer,70,70,70)};
-    if(source&&(!stdDisplay_VBufferLock(source)||!source->surface_lock_alloc)){stdDisplay_VBufferUnlock(source);source=NULL;}
-    if(!stdDisplay_VBufferLock(buffer)||!buffer->surface_lock_alloc){if(source)stdDisplay_VBufferUnlock(source);return;}
+    if(source){int locked=stdDisplay_VBufferLock(source);if(!locked||!source->surface_lock_alloc){if(locked)stdDisplay_VBufferUnlock(source);source=NULL;}}
+    int destinationLocked=stdDisplay_VBufferLock(buffer);
+    if(!destinationLocked||!buffer->surface_lock_alloc){if(destinationLocked)stdDisplay_VBufferUnlock(buffer);if(source)stdDisplay_VBufferUnlock(source);return;}
     int fitWidth=width,fitHeight=height;
     if(source&&source->format.width>0&&source->format.height>0) {
         double scale=fmin((double)width/source->format.width,(double)height/source->format.height);
@@ -1024,6 +1026,9 @@ static SithSurface *rebuiltSupport(SithThing *thing,SithWorld *oldWorld,SithWorl
     return NULL;
 }
 static int apply(const EdModel *m,int meshOnly=0) {
+    // Validate reciprocal portal indices before any live geometry update.
+    for(int c=0;c<m->count;c++)for(int f=0;f<m->c[c].count;f++){const EdFace *p=&m->c[c].f[f];if(p->neighbor<0)continue;
+        if(p->neighbor>=m->count||p->mirror<0||p->mirror>=m->c[p->neighbor].count||m->c[p->neighbor].f[p->mirror].neighbor!=c||m->c[p->neighbor].f[p->mirror].mirror!=f)return 0;}
     unsigned applyStamp=stdPlatform_GetTimeMsec();auto applyPhase=[&](const char *label){if(getenv("GEOSITH_APPLY_PROFILE")){unsigned now=stdPlatform_GetTimeMsec();printf("APPLY_PHASE %s %u ms\n",label,now-applyStamp);applyStamp=now;}};
     if(boundWorld==sithWorld_g_pCurrentWorld&&model&&edSurfacePaintOnlyChange(model,m)&&applySurfacePaint(m))return 1;
     int paintOnly=boundWorld==sithWorld_g_pCurrentWorld&&model&&edPaintOnlyChange(model,m);
@@ -1392,13 +1397,13 @@ static int commit(void) {
     if(netClient()&&!netApplying)return netPropose(candidate);
     int meshOnly=onlyModelGeometryChanged(model,candidate);
     if(!(meshOnly?edMeshValidate(candidate):edValidate(candidate,model))){say("Edit rejected: geometry must remain closed, planar and convex.");return 0;}
-    EdModel published;edCopyModel(&published,candidate);
+    std::unique_ptr<EdModel> published(new EdModel());edCopyModel(published.get(),candidate);
     EditorHistoryEntry entry={0};
     if(pendingUndo){entry=historyEntry(undoModel,&undoPicks);if(!entry.data){say("Edit rejected: could not allocate undo history.");return 0;}}
     EdSelection remapped;edSelectionRemap(model,candidate,&picks,edV(0,0,0),&remapped);
     if(!apply(candidate,meshOnly)){edFree(entry.data);say("Edit rejected: could not allocate live geometry.");return 0;}
     if(entry.data){pushHistory(undoHistory,&undoCount,entry);clearHistoryEntries(redoHistory,&redoCount);pendingUndo=0;}
-    *model=std::move(published);geometryDocumentRevision++;picks=remapped;edClearGeometryError();if(!netApplying)netCommitted();return 1;
+    *model=std::move(*published);geometryDocumentRevision++;picks=remapped;edClearGeometryError();if(!netApplying)netCommitted();return 1;
 }
 static void ray(EdVec *o,EdVec *d) { if(active&&!mapActive&&editorViewReady&&sithCamera_g_pCurCamera!=&sithCamera_g_aCameras[0]){rdMatrix34 cameraWorld;rdMatrix_InvertOrtho34(&cameraWorld,&editorView.orient);*o=vec(cameraWorld.scale);*d=vec(cameraWorld.lvec);return;} SithThing *p=sithWorld_g_pCurrentWorld->pLocalPlayer;rdMatrix34 head,look;rdVector3 eye;rdMatrix_BuildRotate34(&head,&p->actorParams.headPYR);rdMatrix_Multiply34(&look,&p->orient,&head);rdMatrix_TransformVector34(&eye,&p->actorParams.eyeOffset,&look);*o=edAdd(vec(p->position),vec(eye));*d=vec(look.lvec); }
 static int editButton(int function) {
@@ -1412,7 +1417,7 @@ static void leaveEditor(SithThing *p) {
     active=0;p->physicsParams.flags=savedPhysics;g_debugmodeFlags=savedDebug;p->flags=savedThingFlags;grabbing=groupGrab=cleaving=objectGrabbing=objectRotating=lightGrabbing=0;objectHandleHovered=-10000;
     edResetDoubleTap(&jumpTap,0);
     int sector=-1;for(int s=0;s<model->count;s++)if(edContains(&model->c[s],vec(p->position))){sector=s;break;}
-    if(sector<0) {EdVec center=edV(0,0,0);int count=0;for(int f=0;f<model->c[0].count;f++)for(int v=0;v<model->c[0].f[f].count;v++){center=edAdd(center,model->c[0].f[f].v[v].p);count++;}p->position=rdvec(edScale(center,1.0/count));sector=0;}
+    if(sector<0) {EdVec center=edV(0,0,0);int count=0;for(int f=0;f<model->c[0].count;f++)for(int v=0;v<model->c[0].f[f].count;v++){center=edAdd(center,model->c[0].f[f].v[v].p);count++;}if(count)p->position=rdvec(edScale(center,1.0/count));sector=0;}
     sithThing_SetSector(p,&sithWorld_g_pCurrentWorld->aSectors[sector],0);
     syncEditorObjects(model);
     if(!startPlacedCogs(model))say("Some placed COGs could not start. Save and reload to verify script resources.");

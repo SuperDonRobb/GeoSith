@@ -39,6 +39,7 @@
 #include "Dss/sithDSS.h"
 #include "General/stdMath.h"
 #include "jk.h"
+#include "Main/jkEditor.h" // Added: expose editor resource-capacity helpers
 
 #define NUM_THING_PARAMS (74) // JK is 72
 #define NUM_THING_TYPES (13)

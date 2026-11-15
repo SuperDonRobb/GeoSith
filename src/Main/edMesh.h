@@ -152,7 +152,7 @@ int edMeshMoveConstrained(EdModel *m,const EdModel *source,const EdSelection *se
     if(!vertex){delta=edV(round(delta.x/grid)*grid,round(delta.y/grid)*grid,round(delta.z/grid)*grid);if(length(delta)<ED_EPS){edCopyModel(m,source);return 1;}}
 
     if(vertex){EdHit h=selection->hits[0];const EdCell *cell=&source->meshes[h.cell].geometry;EdVec point=cell->f[h.face].v[h.vertex].p;
-        if(!freeMovement){EdModel edges;edges.count=1;edges.c[0]=*cell;h.cell=0;target=edAdd(point,edVertexEdgeDelta(&edges,h,delta,grid));}
+        if(!freeMovement){static EdModel edges;edges.count=1;edges.c[0]=*cell;h.cell=0;target=edAdd(point,edVertexEdgeDelta(&edges,h,delta,grid));}
         else{target=edAdd(point,delta);target=edV(round(target.x/grid)*grid,round(target.y/grid)*grid,round(target.z/grid)*grid);double nearest=grid*.55;
             for(int f=0;f<cell->count;f++)for(int v=0;v<cell->f[f].count;v++){EdVec other=cell->f[f].v[v].p;double distance=length(edSub(other,target));if(distance<nearest){target=other;nearest=distance;}}}
     }
