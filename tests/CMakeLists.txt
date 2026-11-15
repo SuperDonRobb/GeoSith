@@ -99,3 +99,12 @@ add_executable(network_zip_tests network_zip_test.cpp)
 target_compile_features(network_zip_tests PRIVATE cxx_std_17)
 target_link_libraries(network_zip_tests PRIVATE ZLIB::ZLIB)
 add_test(NAME network_zip COMMAND network_zip_tests)
+
+extract_display_test_code("${CMAKE_CURRENT_SOURCE_DIR}/../src/Main/jkEditor.c"
+  "static int loadMissingManifestTemplates(const char *manifest){"
+  "/* Keep level-local template definitions, then add catalog tools"
+  "${CMAKE_CURRENT_BINARY_DIR}/manifest_templates_production.inc")
+add_executable(manifest_template_tests manifest_template_test.cpp)
+target_include_directories(manifest_template_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_features(manifest_template_tests PRIVATE cxx_std_17)
+add_test(NAME manifest_templates COMMAND manifest_template_tests)

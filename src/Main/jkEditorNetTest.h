@@ -322,7 +322,7 @@ static int stressNetwork(SithThing *player){
         }
         if(netTestRole!=1){char marker[32];snprintf(marker,sizeof(marker),"loaded%d.ok",netTestRole);netTestMark(marker,1);puts("GEOSITH_NET_LOADED PASS: saved custom level joined with visible host");fflush(stdout);exit(0);}
         if(netTestMarker("loaded2.ok")&&netTestMarker("loaded3.ok")){puts("GEOSITH_NET_LOADED PASS: both clients joined saved level");fflush(stdout);exit(0);}
-        if(stdPlatform_GetTimeMsec()-netTestStart>(getenv("GEOSITH_NET_EXPECT_SECTORS")?180000u:90000u))exit(2);return 1;
+        if(stdPlatform_GetTimeMsec()-netTestStart>(getenv("GEOSITH_NET_TIMEOUT_MS")?(uint32_t)atoi(getenv("GEOSITH_NET_TIMEOUT_MS")):(getenv("GEOSITH_NET_EXPECT_SECTORS")?180000u:90000u)))exit(2);return 1;
     }
     jkEditor_NetTick();
     sithMessage_RegisterFunction(DSS_PLAYSOUND,netTestSoundMessage);sithMessage_RegisterFunction(DSS_FIREPROJECTILE,netTestFireSoundMessage);

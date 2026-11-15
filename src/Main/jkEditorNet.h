@@ -97,7 +97,11 @@ static int netValidModel(const EdModel *m,int materials){
     if(m->episode.count<1||m->episode.count>ED_EPISODE_ROWS||!netString(m->episode.title,96))return netInvalid(__LINE__);
     for(int i=0;i<m->episode.count;i++){const EdEpisodeRow *r=&m->episode.rows[i];if(!netFilename(r->file,32)||!netString(r->title,96))return netInvalid(__LINE__);for(int j=0;j<20;j++)if(!netString(r->intro[j],160))return netInvalid(__LINE__);}
     if(!edEpisodeValidate(&m->episode))return netInvalid(__LINE__);
-    for(int i=0;i<m->objectCount;i++)if(!netFilename(m->objects[i].templateName,64)||(!sithTemplate_GetTemplate(m->objects[i].templateName)&&edTemplateIndex(m,m->objects[i].templateName)<0))return netInvalid(__LINE__);
+    for(int i=0;i<m->objectCount;i++){
+        const char *name=m->objects[i].templateName;
+        if(!netFilename(name,64)){snprintf(netFailureReason,sizeof(netFailureReason),"Object %d has an invalid template name.",i);return netInvalid(__LINE__);}
+        if(!sithTemplate_GetTemplate(name)&&edTemplateIndex(m,name)<0){snprintf(netFailureReason,sizeof(netFailureReason),"Object %d requires unavailable template '%.63s'.",i,name);return netInvalid(__LINE__);}
+    }
     for(int i=0;i<m->spawnCount+m->objectCount;i++){int id=i<m->spawnCount?-i-1:i-m->spawnCount;EdFrame q=thingPose(m,id);const double values[]={q.position.x,q.position.y,q.position.z,q.rotation.x,q.rotation.y,q.rotation.z};for(int j=0;j<6;j++)if(!isfinite(values[j])||!isfinite((float)values[j]))return netInvalid(__LINE__);if(objectSector(m,q.position)<0)return netInvalid(__LINE__);}
     for(int i=0;i<m->cogCount;i++){const EdPlacedCog *c=&m->cogs[i];if(!netFilename(c->file,32)||c->count<0||c->count>ED_COG_PARAMS)return netInvalid(__LINE__);for(int j=0;j<c->count;j++)if(!netString(c->params[j].name,32)||!netString(c->params[j].value,32))return netInvalid(__LINE__);}
     for(int s=0;s<m->count;s++){if(m->c[s].count<4||m->c[s].count>ED_FACES)return netInvalid(__LINE__);for(int f=0;f<m->c[s].count;f++){const EdFace *p=&m->c[s].f[f];if(p->count<3||!edSurfaceVertexCountAllowed(p->count)||p->material<0||p->material>=materials)return netInvalid(__LINE__);

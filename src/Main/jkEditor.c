@@ -1231,7 +1231,11 @@ static int templateInBlock(const char *block,const char *name){
 static int loadMissingManifestTemplates(const char *manifest){
     const char *block=templateBlock(manifest);if(!block)return 0;StdConffileEntry previous=stdConffile_g_entry;int ok=1;
     for(const char *p=block;p&&*p;p=strchr(p,'\n')){if(*p=='\n')p++;char name[64],parent[64];if(sscanf(p," %63s",name)!=1||name[0]=='#')continue;if(!__strcmpi(name,"end"))break;if(sscanf(p," %63s %63s",name,parent)!=2)continue;
+        // Match stdConffile_ReadLine: the runtime template table is case-sensitive,
+        // but ordinary JKL loading lowercases definitions and their arguments.
+        stdString_CStrToLower(name);
         if(sithTemplate_GetTemplate(name))continue;const char *end=strchr(p,'\n');size_t n=end?(size_t)(end-p):strlen(p);char line[16384];if(n>=sizeof(line)){ok=0;break;}edCopy(line,p,n);line[n]=0;
+        char *comment=strchr(line,'#');if(comment)*comment=0;stdString_CStrToLower(line);
         if(sithWorld_g_pCurrentWorld->numThingTemplates>=sithWorld_g_pCurrentWorld->sizeThingTemplates){ok=0;break;}stdConffile_ReadArgsFromStr(line);sithTemplate_Parse(sithWorld_g_pCurrentWorld);
     }stdConffile_g_entry=previous;return ok;
 }
