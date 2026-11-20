@@ -3,6 +3,8 @@ extern "C" {
 }
 #include "edGeometry.h"
 #include "edResources.h"
+#include "edTeleporterScript.h"
+#include "edHazardScript.h"
 #include "edPngMat.h"
 #include "jkEditorResources.h"
 #include <map>
@@ -158,6 +160,7 @@ static int mapSelfTest(SithThing *player);
 static int placedEditingSelfTest(void);
 static int stressMap(SithThing *player);
 static int mapViewsTest(SithThing *player);
+static int mapThingsTest(SithThing *player);
 static int mapMirrorTest(SithThing *player);
 static int mapMirrorCandidate(void);
 static void screenLine(int x1,int y1,int x2,int y2,int color,int width);
@@ -166,7 +169,7 @@ static void sectorAttributesDialog(void);
 static int stressSectors(SithThing *player);
 static int stressDestructible(SithThing *player);
 static EdBuffer<unsigned char> sectorPicks;
-static int mergeDown,selectSurfaceSectorsDown;
+static int mergeDown,selectSurfaceSectorsDown,selectionCleaveDown;
 static void mergeSelectedSectors(void);
 static int selectedSectorCount(void){int count=0;for(int s=0;s<model->count;s++)count+=sectorPicks[s]!=0;return count;}
 static void remember(void);
@@ -243,6 +246,59 @@ static int readPlacedCogs(EdModel *source,const char *text);
 static int writeCogSources(const EdModel *source,const char *path);
 static char *cogSourceText(const char *name);
 static void suspendPlacedCogs(int geometry);
+static void resetSlashGrates(void);
+static void presetControl(int fire,int grab,int middle,int shift);
+static void thingGeneratorClear();
+static int thingGeneratorHasSelection();
+static void thingGeneratorSelect(int id);
+static void thingGeneratorMenu();
+static void thingGeneratorOverlay();
+static void thingGeneratorTestMenu(jkGuiMenu*);
+static int windTest(SithThing *player);
+static void windMenuTest(jkGuiMenu *menu);
+static int spiralTest();
+static int spiralActive();
+static int spiralCancel();
+static int spiralControl();
+static int spiralStart(int sector,const EdCell &cell);
+static int spiralOptions(int sector,const EdCell &cell);
+static void spiralOverlay();
+static int bevelTest();
+static int bevelActive();
+static int bevelCancel();
+static int bevelControl();
+static int bevelStart();
+static void bevelOverlay();
+static int bevelKeyDown;
+static int windActive();
+static int windCancel();
+static int windControl();
+static void windOverlay(int color);
+static int windStart(int sector,const EdCell &cell);
+static int conveyorActive();
+static int conveyorCancel();
+static int conveyorControl();
+static void conveyorOverlay(int color);
+static int doorActive();
+static int doorCancel();
+static int doorStart(int sector,const EdCell &draft);
+static int doorControl();
+static void doorPreview(EdVec origin,EdVec direction);
+static int waterSimActive();
+static int waterSimStart(int sector);
+static int waterSimFinish();
+static int waterSimTick();
+static void waterSimReset();
+static void waterSimOverlay();
+static int waterSimSelfTest(SithThing *player);
+static int waterSimTestFrame(SithThing *player);
+static void presetMovementKeys(int suppress);
+static void presetPreviewWorld(void);
+static void presetOverlay(void);
+static int presetEscape(void);
+static void presetReset(void);
+static int presetSelfTest(SithThing *player);
+static int presetTestFrame(SithThing *player);
 static int startPlacedCogs(const EdModel *source);
 static void closeCogEditor(void);
 static int cogSelfTest(void);
@@ -355,6 +411,16 @@ void jkEditor_ResourcesLoad(void)try {
 void *jkEditor_ResourceOpen(const char *name,const char *mode)try {
     if(getenv("GEOSITH_GOB_COMPAT_TEST"))return NULL;
     if(!mode||mode[0]!='r'||strchr(mode,'+'))return NULL;
+    // Generated teleporters use the current built-in script, including levels
+    // saved before effects were added. Keep the four public parameters stable.
+    if(EdResources::path(name)=="cog/gs_teleport.cog"){
+        static auto script=std::make_shared<const EdResources::Bytes>(edTeleporterScript,edTeleporterScript+sizeof(edTeleporterScript)-1);
+        return new EdResourceFile{script};
+    }
+    if(EdResources::path(name)=="cog/gs_hazard.cog"){
+        static auto script=std::make_shared<const EdResources::Bytes>(edHazardScript,edHazardScript+sizeof(edHazardScript)-1);
+        return new EdResourceFile{script};
+    }
     auto baked=terrainBakedResources.files.find(EdResources::path(name));if(baked!=terrainBakedResources.files.end())return new EdResourceFile{baked->second};
     if(!customResourcesReady)jkEditor_ResourcesLoad();
     auto found=customResources.files.find(EdResources::path(name));if(found==customResources.files.end())return NULL;
@@ -621,7 +687,7 @@ static void templateMetadata(void) {
     }
 }
 static void freeMenuStrings(jkGuiElement *elements) {
-    for(int i=0;elements[i].type!=ELEMENT_END;i++){if(elements[i].strAlloced)STD_FREE((void*)elements[i].strAlloced);if(elements[i].wHintTextAlloced)STD_FREE((void*)elements[i].wHintTextAlloced);}
+    for(int i=0;elements[i].type!=ELEMENT_END;i++){if(elements[i].strAlloced){STD_FREE((void*)elements[i].strAlloced);elements[i].strAlloced=NULL;}if(elements[i].wHintTextAlloced){STD_FREE((void*)elements[i].wHintTextAlloced);elements[i].wHintTextAlloced=NULL;}}
 }
 static void captureObjectSections(jkGuiMenu *menu) {
     static int frames;if(++frames<3)return;
@@ -630,7 +696,11 @@ static void captureObjectSections(jkGuiMenu *menu) {
 #endif
     menu->lastClicked=102;printf("GEOSITH_OBJECT_SECTIONS PASS: choose Walkstructs\n");fflush(stdout);
 }
-static void generateMenuTest(jkGuiMenu *menu){menu->lastClicked=menu->paElements[0].wstr[0]==u'G'?(getenv("GEOSITH_LIFT_TEST")?(getenv("GEOSITH_LIFT_TOP_TEST")?102:101):100):205;}
+static void generateMenuTest(jkGuiMenu *menu){menu->lastClicked=menu->paElements[0].wstr[0]==u'G'?(getenv("GEOSITH_DOOR_TEST")?105:getenv("GEOSITH_LIFT_TEST")?(getenv("GEOSITH_LIFT_TOP_TEST")?102:101):100):205;}
+static void doorMenuTest(jkGuiMenu *menu){
+    const char16_t *title=menu->paElements[0].wstr;
+    menu->lastClicked=100+(title[0]==u'O'?2:title[0]==u'R'?0:title[5]==u'p'?1:atoi(getenv("GEOSITH_DOOR_TEST")));
+}
 static int chooseList(const char16_t *title,char16_t names[][128],int count,int current) {
     int page=current/24;
     for(;;) {
@@ -647,6 +717,9 @@ static int chooseList(const char16_t *title,char16_t names[][128],int count,int 
         if(title[0]=='3'&&getenv("GEOSITH_BUILDER_CAPTURE")&&getenv("GEOSITH_STRESS"))menu.idkFunc=builderCaptureMenu;
         if(getenv("GEOSITH_ARRAY_TEST")&&getenv("GEOSITH_STRESS")&&title[0]=='A')menu.idkFunc=arrayTestMenu;
         if(title[0]==u'G'&&getenv("GEOSITH_DESTRUCTIBLE_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=generateMenuTest;
+        if(getenv("GEOSITH_DOOR_TEST")&&getenv("GEOSITH_STRESS")&&(title[0]==u'D'||title[0]==u'O'||title[0]==u'R'))menu.idkFunc=doorMenuTest;
+        if(getenv("GEOSITH_TELEPORTER_TEST")&&getenv("GEOSITH_STRESS")&&title[0]==u'T')menu.idkFunc=thingGeneratorTestMenu;
+        if(getenv("GEOSITH_WIND_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=windMenuTest;
         jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);elements[0].wstr=title;
         for(int i=0;i<24;i++)if(page*24+i<count)elements[i+1].wstr=names[page*24+i];
         elements[25].wstr=u"Previous";elements[26].wstr=u"Next";
@@ -1629,7 +1702,7 @@ static int deleteGeometryHandle(EdHit hit){
     edCopyModel(candidate,model);
     if(!edDeleteHandle(candidate,hit)){say("Cannot delete this handle: surfaces must remain closed, planar and convex, with matching adjoins.");return 0;}
     remember();grabbing=groupGrab=cleaving=0;if(!commit())return 0;
-    picks.count=0;hover.cell=-1;say(hit.vertex>=0?"Vertex removed. Ctrl+Z to undo.":"Edge dissolved; coplanar surfaces merged. Ctrl+Z to undo.");return 1;
+    picks.count=0;hover.cell=-1;say(hit.vertex>=0?"Vertex removed. Ctrl+Z to undo.":"Edge dissolved; surfaces merged and made planar. Ctrl+Z to undo.");return 1;
 }
 static int deleteHandleSelfTest(void){
     EdModel *saved=edAlloc(sizeof(*saved));if(!saved)return 0;edCopyModel(saved,model);EdSelection selected=picks;clearHistory();
@@ -1868,7 +1941,7 @@ void jkEditor_SelfTest(void) try {
         }
         printf("GEOSITH_RELOAD %s: level header, title, intro, colormap, UV offsets and walkplayers\n",ok?"PASS":"FAIL");fflush(stdout);exit(ok?0:2);
     }
-    if(getenv("GEOSITH_STRESS")&&(getenv("GEOSITH_NET_ROLE")||!strcmp(jkRes_episodeGobName,"sithed_smoke"))) {
+    if(getenv("GEOSITH_STRESS")&&(getenv("GEOSITH_NET_ROLE")||getenv("GEOSITH_WATER_SIM_MAP_TEST")||!strcmp(jkRes_episodeGobName,"sithed_smoke"))) {
         jkGuiTitle_bSkipLoadingWait=1;return;
     }
     if(!getenv("GEOSITH_SELFTEST")||strcmp(jkRes_episodeGobName,"sithed_smoke")||!jkEditor_IsLevel())return;
@@ -2114,7 +2187,7 @@ static int editorLookSelfTest(SithThing *player){
 }
 static int stressEditor(SithThing *p) {
     static int step;
-    if(!getenv("GEOSITH_STRESS")||(!getenv("GEOSITH_NET_ROLE")&&!getenv("GEOSITH_RESOURCE_RELOAD_TEST")&&!getenv("GEOSITH_DRAG_PROFILE")&&!getenv("GEOSITH_MONOLITH_TEST")&&!getenv("GEOSITH_SPLINE_REBUILD_TEST")&&!getenv("GEOSITH_DESTRUCTIBLE_DIAG")&&!getenv("GEOSITH_BAKER_TEST")&&strcmp(jkRes_episodeGobName,"sithed_smoke")))return 0;
+    if(!getenv("GEOSITH_STRESS")||(!getenv("GEOSITH_NET_ROLE")&&!getenv("GEOSITH_RESOURCE_RELOAD_TEST")&&!getenv("GEOSITH_DRAG_PROFILE")&&!getenv("GEOSITH_MONOLITH_TEST")&&!getenv("GEOSITH_SPLINE_REBUILD_TEST")&&!getenv("GEOSITH_DESTRUCTIBLE_DIAG")&&!getenv("GEOSITH_BAKER_TEST")&&!getenv("GEOSITH_WATER_SIM_MAP_TEST")&&strcmp(jkRes_episodeGobName,"sithed_smoke")))return 0;
     if(getenv("GEOSITH_COG_EXTERNAL_TEST")){static int frames;if(frames++<5)return 1;int ok=cogExternalSelfTest();printf("GEOSITH_COG_EXTERNAL %s\n",ok?"PASS":"FAIL");fflush(stdout);exit(ok?0:2);}
     if(getenv("GEOSITH_TEMPLATE_FLAGS_TEST")){static int frames;if(frames++<5)return 1;int ok=templateFlagsSelfTest();fflush(stdout);exit(ok?0:2);}
     if(getenv("GEOSITH_COG_SOUND_TEST")){static int frames;if(frames++<5)return 1;int ok=cogSoundSelfTest();printf("GEOSITH_COG_SOUND %s\n",ok?"PASS":"FAIL");fflush(stdout);exit(ok?0:2);}
@@ -2272,7 +2345,10 @@ static int stressEditor(SithThing *p) {
         printf("GEOSITH_SCALE %s: repeated face scaling, sector scaling, retained selection and undo\n",ok?"PASS":"FAIL");fflush(stdout);exit(ok?0:2);
     }
     if(getenv("GEOSITH_MAP_MIRROR_TEST")){int ok=bindEditorWorld()&&mapMirrorTest(p);exit(ok?0:2);}
+    if(getenv("GEOSITH_WATER_SIM_TEST"))return waterSimTestFrame(p);
+    if(getenv("GEOSITH_PRESET_TEST"))return presetTestFrame(p);
     if(getenv("GEOSITH_MAP_VIEWS_TEST")){int ok=bindEditorWorld()&&mapViewsTest(p);exit(ok?0:2);}
+    if(getenv("GEOSITH_MAP_THINGS_TEST")){int ok=bindEditorWorld()&&mapThingsTest(p);fflush(stdout);exit(ok?0:2);}
     if(getenv("GEOSITH_MAP_CAPTURE"))return stressMap(p);
     if(getenv("GEOSITH_STAIRS_CAPTURE"))return stressStairs(p);
     if(getenv("GEOSITH_LIGHTS_CAPTURE"))return stressLights(p);
@@ -2557,6 +2633,7 @@ static int objectControl(SithThing *player,EdVec origin,EdVec direction,int fire
         if(edDot(edSub(center,origin),direction)<edDot(edSub(objectFacingHandle(model,objectHandleHovered),origin),direction))objectHandleHovered=-10000;
     }
     objectHovered=objectHandleHovered!=-10000?objectHandleHovered:body;
+    if(freeRotation&&fire&&!grab&&!objectGrabbing){if(!fireDown)thingGeneratorSelect(objectHovered);fireDown=fire;grabDown=grab;return 1;}
     if(grab&&!grabDown&&objectHovered!=-10000){remember();edCopyModel(snapshot,model);objectGrabbed=objectHovered;objectGrabbing=grabbing=1;objectRotating=objectHandleHovered!=-10000;
         grabPlanePoint=thingPose(model,objectGrabbed).position;grabPlaneNormal=direction;
         objectRotationCenter=grabPlanePoint;if(objectRotating)grabPlanePoint=objectFacingHandle(snapshot,objectGrabbed);
@@ -2742,11 +2819,11 @@ static int editorControl(SithThing *p,flex_t delta) {
     /* Map controls own the entire frame, including the transition back to 3D. */
     if(active&&mapActive){mapControl(p);return 1;}
     int toggle=stdControl_ReadKey(DIK_F8,NULL)!=0;
-    if(toggle&&!toggleDown&&!cogPicking()&&builderAsset<0) {
+    if(toggle&&!toggleDown&&!cogPicking()&&builderAsset<0&&!waterSimActive()&&!doorActive()&&!conveyorActive()&&!windActive()&&!bevelActive()&&!spiralActive()) {
         if(!active) { savedPhysics=p->physicsParams.flags;savedDebug=g_debugmodeFlags;savedThingFlags=p->flags;active=1;setEditorFlight(p,0);p->flags|=SITH_TF_INVULN;
             selectSurfaceSectorsDown=stdControl_ReadKey(DIK_L,NULL)!=0;homeDown=stdControl_ReadKey(DIK_HOME,NULL)!=0;tabDown=stdControl_ReadKey(DIK_TAB,NULL)!=0;qDown=stdControl_ReadKey(DIK_Q,NULL)!=0;
             deleteDown=stdControl_ReadKey(DIK_DELETE,NULL)!=0;middleDown=stdControl_ReadKey(KEY_MOUSE_B3,NULL)!=0;
-            syncEditorObjects(model);suspendPlacedCogs(0);edResetDoubleTap(&jumpTap,sithControl_GetKey(INPUT_FUNC_JUMP,NULL));
+            syncEditorObjects(model);suspendPlacedCogs(0);resetSlashGrates();edResetDoubleTap(&jumpTap,sithControl_GetKey(INPUT_FUNC_JUMP,NULL));
             edResetDoubleTap(&selectionTap,editButton(INPUT_FUNC_FIRE1));
             editorGrantTools(p);sithWeapon_SelectWeapon(p,tool,0);sithCamera_g_curCycleCamNum=0;sithCamera_SetCurrentCamera(&sithCamera_g_aCameras[0]);
             say("Editor: double-tap jump to fly. RMB grab, LMB cleave. F8 play.");
@@ -2756,7 +2833,7 @@ static int editorControl(SithThing *p,flex_t delta) {
     jkControl_HandleScreenshot();
     jkControl_HandleCamera(p);
     int tab=stdControl_ReadKey(DIK_TAB,NULL)!=0;
-    if(tab&&!tabDown&&!cogPicking()&&builderAsset<0){tabDown=tab;terrainSessionFinish();mapOpen(p);return 1;}tabDown=tab;
+    if(tab&&!tabDown&&!cogPicking()&&builderAsset<0&&!waterSimActive()&&!doorActive()&&!conveyorActive()&&!windActive()&&!bevelActive()&&!spiralActive()){tabDown=tab;terrainSessionFinish();mapOpen(p);return 1;}tabDown=tab;
     if(edDoubleTap(&jumpTap,sithControl_GetKey(INPUT_FUNC_JUMP,NULL),stdPlatform_GetTimeMsec(),350))
         setEditorFlight(p,(p->physicsParams.flags&SITH_PF_FLY)==0);
     int home=stdControl_ReadKey(DIK_HOME,NULL)!=0,q=stdControl_ReadKey(DIK_Q,NULL)!=0;
@@ -2768,10 +2845,18 @@ static int editorControl(SithThing *p,flex_t delta) {
         rdVector_Scale3Acc(&p->physicsParams.vel,flightSpeedBoost?2.0:0.5);
         say(flightSpeedBoost?"Flight speed: 2x. Force Speed toggles back to normal.":"Flight speed: normal. Force Speed toggles 2x.");
     }
+    presetMovementKeys(1);
     sithControl_PlayerLook(p,delta);
     if(p->physicsParams.flags&SITH_PF_FLY)editorFlightMovement(p);
     else if(p->attach_flags)sithControl_PlayerMovement(p);
     else sithControl_FreeCam(p);
+    presetMovementKeys(0);
+    if(spiralControl())return 1;
+    if(bevelControl())return 1;
+    if(windControl())return 1;
+    if(conveyorControl())return 1;
+    if(doorControl())return 1;
+    if(waterSimTick())return 1;
     if(cogPicking())return cogPickControl(p);
     for(int i=0;i<10;i++)if(stdControl_ReadKey(i?DIK_1+i-1:DIK_0,NULL)) { int weapon=i?i:10;if(weapon!=tool){terrainSessionFinish();tool=weapon;terrainStroke=0;splineDragging=0;grabbing=groupGrab=cleaving=lightGrabbing=objectGrabbing=objectRotating=0;edResetDoubleTap(&selectionTap,editButton(INPUT_FUNC_FIRE1));sithWeapon_SelectWeapon(p,weapon,0);} }
     int shift=stdControl_ReadKey(DIK_LSHIFT,NULL)||stdControl_ReadKey(DIK_RSHIFT,NULL),ctrl=stdControl_ReadKey(DIK_LCONTROL,NULL)||stdControl_ReadKey(DIK_RCONTROL,NULL);
@@ -2788,6 +2873,7 @@ static int editorControl(SithThing *p,flex_t delta) {
         fireDown=fire;grabDown=grab;return 1;
     }
     if(builderAsset>=0){builderControl(fire,grab,middlePressed,shift,ctrl);return 1;}
+    if(tool==6){presetControl(fire,grab,middlePressed,shift);return 1;}
     if(tool==8){if(middlePressed)templateCreatorMenu();fireDown=fire;grabDown=grab;return 1;}
     if(tool==9){if(middlePressed){builderLibraryMenu();return 1;}if(fire&&!fireDown){EdVec origin,direction;ray(&origin,&direction);int object=builderPickModel(origin,direction);if(object>=0)builderEditObject(object);else builderBegin(origin,direction);}fireDown=fire;grabDown=grab;return 1;}
     if(tool==10){int wheel=stdControl_aAxisStates[AXIS_MOUSE_Z];
@@ -2838,9 +2924,18 @@ static int editorControl(SithThing *p,flex_t delta) {
     if(tool==2&&materialDecalMode==2){materialPaintControl(hover,fire,grab);fireDown=fire;grabDown=grab;return 1;}
     if(tool==2&&materialDecalMode==1){if(fire&&!fireDown&&!grab&&hover.cell>=0)placeMaterialDecal(hover,0);fireDown=fire;grabDown=grab;return 1;}
     if(tool==1&&!selectionCleanup&&openAttributes&&!grabbing&&!cleaving){if(selectedSectorCount())sectorAttributesDialog();else surfaceAttributesDialog();attributesDown=1;fireDown=grabDown=1;return 1;}
+    int bevel=stdControl_ReadKey(DIK_B,NULL)!=0,bevelPressed=bevel&&!bevelKeyDown;bevelKeyDown=bevel;
+    if(tool==1&&!selectionCleanup&&!ctrl&&bevelPressed&&!grabbing&&!cleaving){bevelStart();fireDown=fire;grabDown=grab;return 1;}
     int merge=stdControl_ReadKey(DIK_M,NULL)!=0,mergePressed=merge&&!mergeDown;mergeDown=merge;
+    int selectionCleave=(stdControl_ReadKey(DIK_SLASH,NULL)||stdControl_ReadKey(DIK_DIVIDE,NULL))!=0,selectionCleavePressed=selectionCleave&&!selectionCleaveDown;selectionCleaveDown=selectionCleave;
+    if(tool==1&&!selectionCleanup&&!ctrl&&selectionCleavePressed&&!grabbing&&!cleaving){
+        edCopyModel(candidate,model);int kind=edCleaveSelection(candidate,&picks);
+        if(!kind)say("Cleave cancelled: select two vertices on one face, or two edges / faces enclosing a beam in one sector.");
+        else{remember();if(commit()){picks.count=0;sectorPicks.clear();hover.cell=-1;say(kind==1?"Surface cleaved between selected vertices. Ctrl+Z: undo.":kind==3?"Beam cleaved between selected faces. Ctrl+Z: undo.":"Sector cleaved through selected edges. Ctrl+Z: undo.");}}
+        fireDown=fire;grabDown=grab;return 1;
+    }
     if(tool==1&&!selectionCleanup&&mergePressed&&!grabbing&&!cleaving){mergeSelectedSectors();fireDown=fire;grabDown=grab;return 1;}
-    if(tool==3&&openAttributes&&!grabbing){int id=pickEditorObject(origin,direction,hover.cell>=0?hover.distance:1000);if(id!=-10000)thingAttributesDialog(id);attributesDown=1;fireDown=grabDown=1;return 1;}
+    if(tool==3&&openAttributes&&!grabbing){if(thingGeneratorHasSelection()){thingGeneratorMenu();attributesDown=1;fireDown=grabDown=1;return 1;}int id=pickEditorObject(origin,direction,hover.cell>=0?hover.distance:1000);if(id!=-10000)thingAttributesDialog(id);attributesDown=1;fireDown=grabDown=1;return 1;}
     if(tool==3)return objectControl(p,origin,direction,fire,grab,middlePressed,shift);
     if(tool==7)return terrainControl(origin,direction,fire,middlePressed,shift,stdControl_aAxisStates[AXIS_MOUSE_Z],delta,ctrl,grab);
     if(tool==4){
@@ -2958,10 +3053,12 @@ void jkEditor_DrawWorld(void) try {
     if(mapActive)return;
     /* Pick against the same camera and player position used by this frame. */
     rdMatrix34 cameraWorld;rdMatrix_InvertOrtho34(&cameraWorld,&editorView.orient);
+    if(doorActive()){doorPreview(vec(cameraWorld.scale),vec(cameraWorld.lvec));return;}
     if(builderAsset>=0){edMeshRay(model,builderAsset,vec(cameraWorld.scale),vec(cameraWorld.lvec),tool==1,&builderHover);if(builderHover.cell>=0)drawMaterialDecal(&model->meshes[builderHover.cell].geometry.f[builderHover.face],builderHover.point);return;}
     if(cogPicking())updateCogPick(vec(cameraWorld.scale),vec(cameraWorld.lvec));
-    if((tool==1&&(stdControl_ReadKey(DIK_LCONTROL,NULL)||stdControl_ReadKey(DIK_RCONTROL,NULL)))||(tool==10&&(stdControl_ReadKey(DIK_LCONTROL,NULL)||stdControl_ReadKey(DIK_RCONTROL,NULL))))edRaySelection(model,vec(cameraWorld.scale),vec(cameraWorld.lvec),&hover);else if(tool==2)edRayMaterial(model,vec(cameraWorld.scale),vec(cameraWorld.lvec),&hover);else edRay(model,vec(cameraWorld.scale),vec(cameraWorld.lvec),&hover);
+    if(tool==6)edRaySurface(model,vec(cameraWorld.scale),vec(cameraWorld.lvec),&hover,stdControl_ReadKey(DIK_LCONTROL,NULL)||stdControl_ReadKey(DIK_RCONTROL,NULL));else if((tool==1&&(stdControl_ReadKey(DIK_LCONTROL,NULL)||stdControl_ReadKey(DIK_RCONTROL,NULL)))||(tool==10&&(stdControl_ReadKey(DIK_LCONTROL,NULL)||stdControl_ReadKey(DIK_RCONTROL,NULL))))edRaySelection(model,vec(cameraWorld.scale),vec(cameraWorld.lvec),&hover);else if(tool==2)edRayMaterial(model,vec(cameraWorld.scale),vec(cameraWorld.lvec),&hover);else edRay(model,vec(cameraWorld.scale),vec(cameraWorld.lvec),&hover);
     if(hover.cell>=0)drawMaterialDecal(&model->c[hover.cell].f[hover.face],hover.point);
+    presetPreviewWorld();
     if(tool==7)terrainPick(vec(cameraWorld.scale),vec(cameraWorld.lvec),&terrainHover);
     if(tool==4&&!lightGrabbing)lightHovered=pickEditorLight(vec(cameraWorld.scale),vec(cameraWorld.lvec),hover.cell>=0?hover.distance:1000);
     if(!cogPicking())drawFrameGhosts();
@@ -3120,16 +3217,21 @@ void jkEditor_Draw(void) try {
     for(int i=0;i<model->objectCount+model->spawnCount;i++){
         int parent=i<model->objectCount?i:-(i-model->objectCount)-1;EdThingAttributes *a=thingAttributes(model,parent);
         for(int j=0;j<a->frameCount;j++){int id=frameId(parent,j);EdVec center=a->frames[j].position,end=objectFacingHandle(model,id);if(!thingOverlayVisible(id))continue;int selected=tool==3&&(objectGrabbing?objectGrabbed:objectHovered)==id;
-            line(center,end,selectedColor);vertexCircle(end,selected,selected?vertexColor:selectedColor);vertexCircle(center,selected,selectedColor);
+            line(center,end,selectedColor);vertexCircle(end,selected,selected?vertexColor:selectedColor);vertexCircle(center,selected,selected?vertexColor:selectedColor);
             rdVector3 screen;if(project(center,&screen)){char label[64];snprintf(label,sizeof(label),"Thing %d Frame %d",parent<0?-parent-1:model->spawnCount+parent,j);editorDrawText(highlightCanvas->pVBuffer,jkGui_stdFonts[0],(int)screen.x+14,(int)screen.y-22,260,label,1);}
         }
     }
     for(int i=0;i<model->spawnCount;i++){
-        EdVec p=model->spawns[i].position;if(!objectOverlayVisible(p))continue;int color=tool==3&&objectHovered==-i-1?selectedColor:vertexColor;
+        EdVec p=model->spawns[i].position;if(!thingOverlayVisible(-i-1))continue;int color=tool==3?(objectHovered==-i-1?vertexColor:facingColor):vertexColor;
         vertexCircle(p,1,color);line(edAdd(p,edV(-.045,0,0)),edAdd(p,edV(.045,0,0)),color);line(edAdd(p,edV(0,-.045,0)),edAdd(p,edV(0,.045,0)),color);line(p,edAdd(p,edV(0,0,.1)),color);
         rdVector3 screen;if(project(p,&screen)){char label[48];snprintf(label,sizeof(label),"walkplayer %d",i+1);editorDrawText(highlightCanvas->pVBuffer,jkGui_stdFonts[0],(int)screen.x+12,(int)screen.y+8,180,label,1);}
     }
-    if(tool==3){int id=objectGrabbing?objectGrabbed:objectHovered;if(id>=0&&id<model->objectCount&&thingOverlayVisible(id)){EdVec p=model->objects[id].position;vertexCircle(p,1,selectedColor);line(edAdd(p,edV(0,0,-.1)),edAdd(p,edV(0,0,.1)),selectedColor);}}
+    if(tool==3){for(int id=0;id<model->objectCount;id++){
+        if(edTerrainObject(model,id)>=0||!thingOverlayVisible(id))continue;
+        int highlighted=(objectGrabbing?objectGrabbed:objectHovered)==id;
+        int color=highlighted?vertexColor:facingColor;EdVec p=model->objects[id].position;
+        vertexCircle(p,highlighted,color);line(edAdd(p,edV(0,0,-.1)),edAdd(p,edV(0,0,.1)),color);
+    }}
     else if(tool==7){if(terrainHover.cell<0&&hover.cell>=0){EdHit surface=hover;surface.vertex=surface.edge=-1;drawHit(&surface,edgeColor);}}
     else if(tool==4){if(hover.cell>=0){EdHit surface=hover;surface.vertex=surface.edge=-1;drawHit(&surface,edgeColor);}}
     else {
@@ -3140,6 +3242,10 @@ void jkEditor_Draw(void) try {
     if(tool!=1||!selectionCleanup)for(int i=0;i<picks.count;i++)drawHit(&picks.hits[i],selectedColor);
     if(tool==1&&!selectionCleanup)for(int s=0;s<model->count;s++)if(sectorPicks[s])for(int f=0;f<model->c[s].count;f++){EdHit face={s,f,-1,-1};drawHit(&face,selectedColor);}
     drawSurfaceLocks(selectedColor);
+    presetOverlay();
+    waterSimOverlay();
+    conveyorOverlay(selectedColor);windOverlay(selectedColor);bevelOverlay();spiralOverlay();
+    thingGeneratorOverlay();
     drawEditorCrosshair();
     stdDisplay_VBufferUnlock(highlightCanvas->pVBuffer);
     if(tool==2||tool==3) {
@@ -3149,7 +3255,7 @@ void jkEditor_Draw(void) try {
         char label[160];snprintf(label,sizeof(label),"%d/%d %s",tool==3?currentTemplate+1:currentMaterial+1,tool==3?templateCount:paletteCount,tool==3?templateNames[currentTemplate]:paletteNames[currentMaterial]);
         stdDisplay_VBufferLock(buffer);editorDrawText(buffer,jkGui_stdFonts[0],x,y+100,182,label,1);stdDisplay_VBufferUnlock(buffer);
     }
-    if(tool==1){tVBuffer *buffer=highlightCanvas->pVBuffer;int x=buffer->format.width-280,y=buffer->format.height-175;if(x<8)x=8;if(y<60)y=60;stdDisplay_VBufferLock(buffer);editorDrawText(buffer,jkGui_stdFonts[0],x,y,270,selectionCleanup?"Clean Up":"Select",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+24,270,"Middle mouse: selection tools",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+48,270,"Wheel: Select / Clean Up",1);if(selectionCleanup)editorDrawText(buffer,jkGui_stdFonts[0],x,y+72,270,"Fire 1: clean selection / aimed sector",1);else {editorDrawText(buffer,jkGui_stdFonts[0],x,y+72,270,"Shift+click: sectors | M: merge",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+96,270,"Enter: attributes | Shift+wheel: scale",1);}stdDisplay_VBufferUnlock(buffer);}
+    if(tool==1){tVBuffer *buffer=highlightCanvas->pVBuffer;int x=buffer->format.width-280,y=buffer->format.height-175;if(x<8)x=8;if(y<60)y=60;stdDisplay_VBufferLock(buffer);editorDrawText(buffer,jkGui_stdFonts[0],x,y,270,selectionCleanup?"Clean Up":"Select",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+24,270,"Middle mouse: selection tools",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+48,270,"Wheel: Select / Clean Up",1);if(selectionCleanup)editorDrawText(buffer,jkGui_stdFonts[0],x,y+72,270,"Fire 1: clean selection / aimed sector",1);else {editorDrawText(buffer,jkGui_stdFonts[0],x,y+72,270,"Shift+click: sectors | M: merge",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+96,270,"Enter: attributes | Shift+wheel: scale",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+120,270,"B: bevel edge | /: cleave",1);}stdDisplay_VBufferUnlock(buffer);}
     if(tool==10){tVBuffer *buffer=highlightCanvas->pVBuffer;char name[48],text[128];shapeLabel(cleaveShape,name,sizeof(name));snprintf(text,sizeof(text),"%s | radius %.4g",name,shapeRadius);int x=buffer->format.width-280,y=buffer->format.height-180;if(x<8)x=8;if(y<60)y=60;stdDisplay_VBufferLock(buffer);editorDrawText(buffer,jkGui_stdFonts[0],x,y,270,text,1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+24,270,"Middle mouse: shapes",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+48,270,"Wheel: shape | Shift: radius",1);snprintf(text,sizeof(text),"Ctrl+wheel: rotate (%.0f deg)",shapeRotation);editorDrawText(buffer,jkGui_stdFonts[0],x,y+72,270,text,1);stdDisplay_VBufferUnlock(buffer);}
     if(tool==2){tVBuffer *buffer=highlightCanvas->pVBuffer;int x=(std::max)(8,buffer->format.width-300),y=(std::max)(60,buffer->format.height-125);char label[128];snprintf(label,sizeof(label),materialDecalMode==2?"Texture Paint | diameter %.3g":materialDecalMode?"Decal | width %.3g":"Texture",materialDecalSize);stdDisplay_VBufferLock(buffer);editorDrawText(buffer,jkGui_stdFonts[0],x,y,290,label,1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+24,290,"Wheel: mode | Shift+wheel: texture",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+48,290,materialDecalMode==2?"Ctrl+wheel: size | Hold Fire 1: paint":materialDecalMode?"Ctrl+wheel: size | Fire 1: place":"Fire 1: apply | Fire 2: adjust UV",1);stdDisplay_VBufferUnlock(buffer);}
     if(tool==7){tVBuffer *buffer=highlightCanvas->pVBuffer;int x=(std::max)(8,buffer->format.width-320),y=(std::max)(60,buffer->format.height-175);char label[128];snprintf(label,sizeof(label),"%s | radius %.3g | intensity %.0f%%",terrainTextureMode?"Texture":"Sculpt",terrainRadius,terrainIntensity*100);stdDisplay_VBufferLock(buffer);editorDrawText(buffer,jkGui_stdFonts[0],x,y,310,label,1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+24,310,terrainTextureMode?"Fire 1: texture 1 | Fire 2: texture 2":"Fire 1: create / raise | Shift: lower",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+48,310,terrainTextureMode?"Wheel: sculpt | Middle mouse: textures":"Ctrl+Fire 1: smooth | Fire 2: grab",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+72,310,"Shift+wheel: size | Ctrl+wheel: strength",1);stdDisplay_VBufferUnlock(buffer);}
@@ -3163,7 +3269,7 @@ void jkEditor_Draw(void) try {
         editorDrawText(buffer,jkGui_stdFonts[0],x,y+70,240,id>=0?"Wheel: intensity":"Wheel: sector light",1);editorDrawText(buffer,jkGui_stdFonts[0],x,y+92,240,id>=0?"Shift+wheel: range":"Shift+wheel: surface light",1);stdDisplay_VBufferUnlock(buffer);
     }
     stdDisplay_VBufferLock(Video_pMenuBuffer);
-    char status[256];snprintf(status,sizeof(status),"EDITOR | %s | %d sectors | %d selected | %s",tool==1?"Selection":tool==2?"Materials":tool==3?"Objects":tool==4?"Lights":tool==5?"Placed COGs":tool==7?"Terrain":tool==8?"Templates (MMB)":tool==9?"3DO Builder":tool==10?"Saber":"Reserved",model->count,picks.count+selectedSectorCount(),sectorMode||selectedSectorCount()?"SECTOR":tool==5?"Middle mouse: placed COGs":tool==4?"LIGHT":h->vertex>=0?"VERTEX":h->edge>=0?"EDGE":"SURFACE");
+    char status[256];snprintf(status,sizeof(status),"EDITOR | %s | %d sectors | %d selected | %s",tool==1?"Selection":tool==2?"Materials":tool==3?"Objects":tool==4?"Lights":tool==5?"Placed COGs":tool==6?"Presets":tool==7?"Terrain":tool==8?"Templates (MMB)":tool==9?"3DO Builder":tool==10?"Saber":"Reserved",model->count,picks.count+selectedSectorCount(),sectorMode||selectedSectorCount()?"SECTOR":tool==5?"Middle mouse: placed COGs":tool==4?"LIGHT":h->vertex>=0?"VERTEX":h->edge>=0?"EDGE":"SURFACE");
     editorDrawText(Video_pMenuBuffer,jkGui_stdFonts[0],8,8,630,status,1);char networkStatus[192];editorDrawText(Video_pMenuBuffer,jkGui_stdFonts[0],8,28,630,netEditStatus(networkStatus,sizeof(networkStatus))?networkStatus:message,1);
     stdDisplay_VBufferUnlock(Video_pMenuBuffer);
 } catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return;}
@@ -3237,13 +3343,21 @@ void jkEditor_HeaderDialog(void) try {
         else if(choice==1){remember();edCopyModel(candidate,model);candidate->header=draft;if(commit()){say("Level header updated. Use Save Level to keep changes.");break;}}
     }
 } catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return;}
+#include "jkEditorConveyor.h"
+#include "jkEditorWind.h"
+#include "jkEditorBevel.h"
+#include "jkEditorSpiral.h"
 #include "jkEditorSurface.h"
+#include "jkEditorDoor.h"
 #include "jkEditorSector.h"
 #include "jkEditorEpisode.h"
 #include "jkEditorCogs.h"
 #include "jkEditorThings.h"
+#include "jkEditorThingGenerators.h"
 #include "jkEditorNet.h"
 #include "jkEditorNetTest.h"
+#include "jkEditorPresets.h"
+#include "jkEditorWaterSim.h"
 void jkEditor_SaveDialog(void) try {
     if(!jkEditor_IsLevel()||!bindEditorWorld())return;
     if(terrainSessionOpen())terrainSessionFinish();
@@ -3281,6 +3395,6 @@ void jkEditor_SaveDialog(void) try {
     }
     for(int i=0;elements[i].type!=ELEMENT_END;i++){if(elements[i].strAlloced)STD_FREE((void*)elements[i].strAlloced);if(elements[i].wHintTextAlloced)STD_FREE((void*)elements[i].wHintTextAlloced);}
 } catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return;}
-void jkEditor_Close(void) try {resetCustomTemplates();stitchReady=stitchCopyDown=stitchPasteDown=0;terrainSelected=-1;terrainStroke=0;terrainHover.cell=-1;splineSelected=splineDrawing=splineDragging=splineStartDown=splineEnterDown=0;splinePoint=-1;oppositeAdjoinDown=0;flightSpeedBoost=flightSpeedDown=0;editorFullbright=forceSeeingDown=0;sectorPicks.clear();mergeDown=selectSurfaceSectorsDown=0;liveSectorColormaps.clear();failedImportWorld=NULL;importingStock=0;protectedEpisode[0]=0;edFree(resources);resources=NULL;builderRestoreHidden();builderMeshPicks.clear();builderMeshClipboard.clear();builderInverting=0;builderAsset=-1;builderExitRequested=0;builderFreeCache();freeEditorText();if(mapActive)mapClose(boundWorld?boundWorld->pLocalPlayer:NULL);edFree(mapClipboard);mapClipboard=NULL;edFree(mapPending);mapPending=NULL;mapInvalidate();netClose();closeCogEditor();if(active)g_debugmodeFlags=savedDebug;active=0;boundWorld=NULL;grabbing=groupGrab=cleaving=objectGrabbing=objectRotating=0;objectHandleHovered=-10000;clearHistory();toggleDown=fireDown=grabDown=homeDown=tabDown=qDown=nextSpawn=deleteDown=middleDown=attributesDown=0;picks.count=grabPicks.count=undoPicks.count=0;edResetDoubleTap(&jumpTap,0);edResetDoubleTap(&selectionTap,0);hover.cell=-1;clearObjectPreviews();decalFreeMaterials();terrainFreePaint();freeEditorMaterials();if(bladeReady){rdPolyline_FreeEntry(&cleaveBlade);edZero(&cleaveBlade,0,sizeof(cleaveBlade));bladeReady=0;}} catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return;}
+void jkEditor_Close(void) try {spiralCancel();bevelCancel();bevelKeyDown=0;windCancel();thingGeneratorClear();conveyorCancel();doorCancel();waterSimReset();presetReset();resetCustomTemplates();stitchReady=stitchCopyDown=stitchPasteDown=0;terrainSelected=-1;terrainStroke=0;terrainHover.cell=-1;splineSelected=splineDrawing=splineDragging=splineStartDown=splineEnterDown=0;splinePoint=-1;oppositeAdjoinDown=0;flightSpeedBoost=flightSpeedDown=0;editorFullbright=forceSeeingDown=0;sectorPicks.clear();mergeDown=selectSurfaceSectorsDown=0;liveSectorColormaps.clear();failedImportWorld=NULL;importingStock=0;protectedEpisode[0]=0;edFree(resources);resources=NULL;builderRestoreHidden();builderMeshPicks.clear();builderMeshClipboard.clear();builderInverting=0;builderAsset=-1;builderExitRequested=0;builderFreeCache();freeEditorText();if(mapActive)mapClose(boundWorld?boundWorld->pLocalPlayer:NULL);edFree(mapClipboard);mapClipboard=NULL;edFree(mapPending);mapPending=NULL;mapInvalidate();netClose();closeCogEditor();if(active)g_debugmodeFlags=savedDebug;active=0;boundWorld=NULL;grabbing=groupGrab=cleaving=objectGrabbing=objectRotating=0;objectHandleHovered=-10000;clearHistory();toggleDown=fireDown=grabDown=homeDown=tabDown=qDown=nextSpawn=deleteDown=middleDown=attributesDown=0;picks.count=grabPicks.count=undoPicks.count=0;edResetDoubleTap(&jumpTap,0);edResetDoubleTap(&selectionTap,0);hover.cell=-1;clearObjectPreviews();decalFreeMaterials();terrainFreePaint();freeEditorMaterials();if(bladeReady){rdPolyline_FreeEntry(&cleaveBlade);edZero(&cleaveBlade,0,sizeof(cleaveBlade));bladeReady=0;}} catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return;}
 
 

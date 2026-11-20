@@ -11,6 +11,7 @@
 - [3 — Things and frames](#3--things-and-frames)
 - [4 — Lights](#4--lights)
 - [5 — Placed COGs](#5--placed-cogs)
+- [6 — Presets](#6--presets)
 - [8 — Template Creator](#8--template-creator)
 - [9 — 3DO Builder](#9--3do-builder)
 - [Overhead map](#overhead-map)
@@ -89,6 +90,9 @@ Middle mouse opens the mode menu. The wheel also switches between **Select** and
 | Fire 1 while holding Fire 2 | Extrude selected surfaces together |
 | Hold Shift while aiming | Highlight adjoins instead of looking through them |
 | Enter with surfaces selected | Open Surface Attributes |
+| / with exactly two vertices selected | Cleave their shared surface between the selected vertices |
+| / with exactly two edges selected | Cleave their common sector through both edges when possible; non-coplanar edges use two boundary-following planar cuts when both selected faces can be preserved |
+| / with exactly two faces selected | Cleave the connecting sides of a convex pillar / beam between the faces in their common sector; surrounding sectors remain intact |
 | Delete on an edge or vertex | Dissolve it if the remaining geometry is valid and convex |
 | Delete on a surface | Delete its sector |
 
@@ -109,7 +113,11 @@ Cleanup combines compatible coplanar faces into simpler convex patches and remov
 1. Start with a **six-surface sector** with horizontal floor and ceiling.
 2. Select the two opposite vertical end walls: **high end first, low end second**.
 3. Press **Enter** to open Surface Attributes.
-4. Set **Stair steps**, then click **Create Stairs**.
+4. Open **Generate**, set **Stair steps**, then click **Create Stairs**.
+
+### Slash grate
+
+Select an adjoin surface, press **Enter**, then choose **Generate → Slash Grate**. This applies `08tgrate.mat` to both sides, blocks movement through the adjoin, and adds `00_slashgrate.cog` with the selected side as `grate` and the opposite side as `grateback`. Saber or explosion damage breaks the grate and opens the passage. You can also select both sides of the same adjoin. The operation supports undo.
 
 The result uses visible stair wedges and an invisible **Floor + Impassable** ramp so the player walks smoothly. Creation is one undo step.
 
@@ -193,6 +201,23 @@ Materials can be picked from surfaces, templates from things, and vectors from a
 
 **Clear value** unassigns a reference or zeros a numeric/vector value. Local script symbols are omitted. Editor mode suspends scripts; F8 starts or restarts them for playtesting. Save Level includes the selected scripts and parameter assignments in the GOB.
 
+## 6 — Presets
+
+Presets preserve a reusable assembly of sectors, things, path frames, custom templates/models, and associated COGs across levels.
+
+1. Select weapon **6**. Click things and sectors to toggle their selection. **Shift+click** selects the sector behind a thing. **Double-click Fire 1** clears all sectors and things selected for preset creation.
+2. Click the intended mounting face when selecting the first sector. **Ctrl+click** targets adjoins and explicitly sets the mounting face, adding its sector to the selection. The mounting face must be on the boundary of the selected sectors, with the selected sectors behind it. Selected things' centers and rotation handles turn **purple**.
+3. Press **Enter** and choose **Create Preset**, then give it a name. For sector assemblies, the containing sectors of selected things are included automatically so a door or lift is not saved without its room. If an associated COG refers to another unselected sector or thing, select that item too before creating the preset.
+4. Choose a preset using the **mouse wheel** or **middle-mouse library menu**. Aim at a surface to see its yellow placement preview, then press **Fire 1** to place it. The mounting face aligns to that surface and the sectors extend beyond it, creating an adjoin where they meet.
+   Use **Numpad 8/2/4/6** to offset the preview up/down/left/right along the surface, one editor grid unit (0.0625 map units) per press. **Numpad 5** recenters it. The offset applies to placement too, stays for repeated placements, and resets when you choose a preset from the library or wheel.
+5. Press **Escape** or choose **Select Geometry** to return to selection. **Ctrl+Z** undoes a placement, including its things and COGs. **Ctrl+Y** or **Ctrl+Shift+Z** redoes it; these shortcuts work with weapon 6 still selected.
+
+The library menu also provides **Delete Selected**. Deleting a library entry does not remove copies already placed in a level. Copies receive their own COG references, templates, and model names.
+
+Personal presets are `.gsp` files in the game's `presets` folder (normally `JK/presets`). Curated defaults can be installed in `presets` beside the executable; development builds also read the project-root `presets` folder. The export packager includes curated `.gsp` files. Presets carry referenced custom resources; stock resources come from the installed game. You can share these files independently of a level.
+
+In multiplayer, placements use the usual host approval and undo paths. If a client preset introduces custom resources that the host does not yet have, the host must place that preset once first. The host then distributes those resources with the level.
+
 ## 8 — Template Creator
 
 Press **middle mouse** to open the list of created templates.
@@ -268,7 +293,7 @@ Press **Tab** to enter or leave the map. Green geometry sits on a black backgrou
 | Ctrl+V | Start another preview from the clipboard |
 | Insert | Start a default six-sided-sector preview |
 | Left-click during placement | Place and merge the preview |
-| C | Start a sector cleave |
+| C or / | Start a sector cleave |
 | Delete | Delete selected sectors, keeping at least one |
 | Escape | Cancel the current preview, drawing, or cleave |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
@@ -286,7 +311,15 @@ New sectors use the current material and are one JK unit tall, starting at the f
 
 ### Cleave selected sectors
 
-Press **C**, then click-drag a line or click its two endpoints. The preview is yellow when it crosses selected sectors and red when it misses. Completing the line makes a vertical cut and joins the halves with adjoins. Each completed cleave is one undo step.
+Press **C** or **/**, then click-drag a line or click its two endpoints. The preview is yellow when it crosses selected sectors and red when it misses. Completing the line makes a vertical cut and joins the halves with adjoins. Each completed cleave is one undo step.
+
+## Flowing Water SIM
+
+Select one sector, open **Sector Attributes → Generate → Flowing Water SIM**. The selected sector continuously supplies water. Blue outlines show only the highest wet surface in each vertical grid column; sparse pale arrows show the current. You can move around during the preview. Mouse wheel up/down increases/decreases simulation speed from 0.25× to 10×; each simulation starts at 1× and displays its current speed. Large simulations remain limited by the per-frame work budget. Other edits and switching to play/map mode wait until it finishes.
+
+Press **Escape** to bake the current water levels. It also bakes automatically when the connected space fills or the source cannot add more water and flow stops. Partial sectors are cleaved along fitted water-surface planes; the lower portions receive underwater flags, `00underwater.wav` at volume `0.25`, and tint `0.1 0.1 1`. Water/air adjoins use translucent, textured `oasis_water.mat` on both sides. Placed instances of the stock `00_conveyor.cog` scroll the water surfaces using the simulated flow direction and speed. Each generated underwater sector also receives thrust in its volume-weighted simulated flow direction, with strength equal to twice that speed. A bundled startup COG restores these currents when the saved level loads. Walkable floors below water shallower than the player’s floor-to-origin standing height receive shallow, deep, or very deep water surface flags in three equal depth bands. Each floor uses its deepest corner; metal and dirt footstep flags are replaced so water sounds take priority. **Ctrl+Z** undoes the entire generation.
+
+The simulation uses a sparse 3D voxel grid with fractional water volumes. Water falls into available voxels below, then spreads sideways to equalize neighboring water heights. This lets water follow a sloped channel while pools settle toward a level surface. Grid spacing starts at 0.0625 units and adapts for large connected volumes to bound memory use. The grid exists only in the simulation and is never saved as level geometry. Baking ignores unsupported falling water when measuring pool surfaces. Flat-bottomed reservoirs receive horizontal planes from their accumulated water volume; sloped channels use fitted planes from supported water-surface samples. This adds at most one cleave per sector. Where both water surfaces cross a shared passable adjoin, their planes are matched along the waterline, avoiding stepped seams while keeping reservoir planes horizontal. Matching does not flatten an inclined channel into the reservoir plane or join a stream above an opening to a pool below it. Empty and completely filled sectors need no cleave. It follows gravity and open, passable adjoins; doors and other thing models are not fluid obstacles. Connected editable splines must first be converted to sectors. The live preview is local in multiplayer; finished geometry goes through normal host approval and replication. If another edit changes the level during simulation, the preview is discarded rather than overwriting that edit.
 
 ## Saving and level settings
 
@@ -414,3 +447,40 @@ Use the same release on all multiplayer peers (editor protocol 22).
 - Invalid spline geometry appears red in the map and stays out of the 3D world. Adjust its points to make it valid; cancelling a spline with only one point removes it.
 - Moving an editable spline restores its previous intersections instead of leaving cuts in surrounding sectors. Escape cancels active drawing/cleaving before opening the pause menu.
 - In map view, select sectors and press Enter to create a named group. Add an array along an axis, set the copy count, or delete the group. Choose a group in the spline menu to bend repeated copies along the curve using their original textures.
+
+
+### Door generator
+
+Select one sector with weapon 1, press Enter, then **Generate → Door**. Choose sliding or split panels, an opening axis, and Automatic, Player Activate, Wall switch, or Key pickup activation. Key doors use the chosen red, blue, or yellow key; place that pickup with weapon 3.
+
+Wall switch returns to the 3D view. Aim the switch preview at a solid wall outside the door sector and press Fire1. This cuts a square, applies `00tcall.mat`, and connects the switch to the door. Escape cancels the pending door and switch without changing the level.
+
+Models, templates, movement frames, sounds and the generated COG are assigned automatically and included on save. Doors close after two seconds and reopen if blocked while closing. Change speed or delay in Placed COGs. Generation supports undo and host approval; leave room for the panels to retract along their chosen axis.
+
+
+### Conveyor Belt surface generator
+
+Select one or more surfaces with weapon 1, press Enter, then **Generate → Conveyor Belt**. This returns to 3D with a rotation ring and direction arrow on the first selected face. Hold Fire2 on the arrow's end circle and move the crosshairs to rotate the shared belt direction in that surface plane.
+
+Press Enter or Fire1 to apply all belts in one undo step. Escape cancels. Each belt uses `00_conveyor.cog` at speed 2; edit speed in Placed COGs. The script saves with the level, and generation follows normal multiplayer host approval.
+
+### Teleporter thing generator
+
+In weapon 3, use **Shift+Fire1** to select two placed ghost things. Selected ghosts have purple handles and numbered labels. Press **Enter → Teleporter**, then choose **Two-way** or **One-way (1 to 2)**. For one-way travel, select the entrance first and the destination second.
+
+Players teleport when they approach within 0.25 units of a ghost in its sector. The destination ghost controls the exit position and facing. Both ends play the stock teleport/spawn sound (`ForceThrow01.wav`) and emit `+telesparks` particles. Step away from the exit before returning through a two-way teleporter. Place the ghosts at least 0.5 units apart, within sectors.
+
+The generator adds a `gs_teleport.cog` instance to Placed COGs, where you can adjust the radius or travel mode. The script is included in the saved level and uses the normal multiplayer edit approval path. **Ctrl+Z** undoes generation.
+
+
+### Things in the 2D map
+
+All six map views show thing centers and model bounding boxes. Click a center to toggle its selection; right-drag to move selected things in the current view plane. Movement uses half the visible map grid and keeps the hidden-axis position. With weapon 3 active, drag a selection box to select things; other tools retain sector box selection. Double-click clears selection, and Ctrl+Z undoes movement. Thing centers must remain inside a sector.
+
+### Wind tunnels
+
+Select a sector with weapon 1, press Enter, then **Generate → Wind Tunnel**. The editor returns to 3D with a direction gizmo at the sector center. Hold **Fire2** on its tip and move the crosshairs to aim the thrust in 3D. The **mouse wheel** adjusts strength from 0.25 to 100. **Enter** or **Fire1** applies it; **Escape** cancels. Reopen the generator to adjust existing wind. Ctrl+Z undoes the operation.
+
+For editable sector splines, open **Spline Shape and Geometry → Wind Tunnel**, choose **Off**, **Forward**, or **Reverse**, then select a strength and Apply. Forward follows the point order; Reverse goes toward the start. Each generated sector follows the curve's local direction, including vertical bends and mirrored copies. Reshaping the spline updates its wind. Walkstruct splines do not create sectors, so their wind option requires turning off Make walkstruct first.
+
+Wind uses sector thrust and a generated `gs_wind.cog` included with the saved level. Multiplayer uses normal host-approved edits; all players need this version because spline wind adds network document data.

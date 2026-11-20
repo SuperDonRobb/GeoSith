@@ -70,12 +70,17 @@ typedef struct {
 #define ED_SPLINE_POINTS 128
 #define ED_SPLINE_SECTORS 256
 typedef struct {EdVec position,handle;} EdSplinePoint;
-typedef struct {int id,count,sides,segments,material,closed,mirrorAxes,groupId;int makeWalkstruct;char walkstructName[32];double width,height;unsigned int geometryHash,sectorFlags,sectorFlagsMask;int hasSectorTint;EdVec sectorTint;EdBuffer<EdSplinePoint> points;int invalid,textureHeight;EdBuffer<EdCell> cutBefore,cutAfter,preview;} EdSpline;
+typedef struct {int id,count,sides,segments,material,closed,mirrorAxes,groupId;int makeWalkstruct;char walkstructName[32];double width,height;unsigned int geometryHash,sectorFlags,sectorFlagsMask,surfaceFlags,surfaceFlagsMask;int hasSectorTint;EdVec sectorTint;double windSpeed;EdBuffer<EdSplinePoint> points;int invalid,textureHeight;EdBuffer<EdCell> cutBefore,cutAfter,preview;} EdSpline;
 struct EdSectorGroup {char name[64]={};int count=0,direction=2,copies=0;EdBuffer<EdCell> cells;};
 struct EdDecalMaterial {char name[32]={};std::shared_ptr<const std::vector<unsigned char>> data;};
 typedef struct { int count; EdVec spawn; int spawnCount; EdSpawn spawns[ED_SPAWNS]; EdLevelHeader header; int objectCount;EdBuffer<EdObject> objects;int lightCount;EdBuffer<EdLight> lights;EdEpisode episode;int cogCount;EdBuffer<EdPlacedCog> cogs;int assetCount,meshCount;EdBuffer<EdAsset> assets;EdBuffer<EdMesh> meshes;int templateCount;EdBuffer<EdTemplate> templates;EdBuffer<EdCell> c; int splineCount;EdBuffer<EdSpline> splines;int decalCount;EdBuffer<EdDecalMaterial> decals;int groupCount;EdBuffer<EdSectorGroup> groups; } EdModel;
 int edGenerateDestructible(EdModel*,const EdBuffer<unsigned char>&,const char*);
+int edGenerateHazard(EdModel*,const EdBuffer<unsigned char>&,int material,int kind);
+int edGenerateWater(EdModel*,const EdBuffer<unsigned char>&,int material);
 int edGenerateLift(EdModel*,int,const char*,const EdPlacedCog&,int startAtTop=0);
+int edGenerateDoor(EdModel*,int,const char*,int split,EdVec axis,int activation,int key,int switchCell=-1,int switchFace=-1);
+int edDoorSwitchOutline(const EdFace*,EdVec,EdFace*);
+int edDoorSwitch(EdModel*,int,int,EdVec,int,int,int);
 int edGroupsValidate(const EdModel*);
 int edGroupCapture(EdModel*,const EdBuffer<unsigned char>&,const char*);
 int edGroupArray(EdModel*,const EdModel*,int,int,int);
@@ -92,7 +97,7 @@ int edSplineValidate(const EdModel *m);
 int edSplineRepairWalkstructs(EdModel *m);
 void edSplineReadMetadata(EdModel *m,const char *text);
 /* Unused sector capacity is not part of a document or its equality. */
-int edMergeSectors(EdModel *model,const EdBuffer<unsigned char>& selected,int *merged);
+int edMergeSectors(EdModel *model,const EdBuffer<unsigned char>& selected,int *merged,char *reason=nullptr,size_t reasonSize=0);
 void edCopyModel(EdModel *out,const EdModel *source);
 unsigned int edCellHash(const EdCell *cell);
 int edCellsEqual(const EdCell *a,const EdCell *b);
@@ -103,6 +108,8 @@ inline int edCompare(const EdCell* a,const EdCell* b,size_t) {return !edCellsEqu
 
 typedef struct { int cell,face,vertex,edge; double distance; EdVec point; } EdHit;
 typedef struct { int count; EdHit hits[ED_SELECTIONS]; } EdSelection;
+int edGenerateConveyors(EdModel*,const EdSelection&,const EdVec*,const EdPlacedCog&,double speed);
+int edGenerateTeleporter(EdModel*,int entrance,int destination,int twoWay);
 int edTerrainRemovePaint(EdModel*,int asset,int material);
 int edTerrainCreate(EdModel *out,const EdModel *source,const EdSelection *surfaces,const char *name);
 int edTerrainPaint(EdModel*,int,EdVec,double,double,const char*,const char*(*)(int));
@@ -171,11 +178,16 @@ int edVertexLimitHit(void);
 int edSurfaceVertexCountAllowed(int count);
 int edRay(const EdModel *m,EdVec origin,EdVec direction,EdHit *hit);
 int edRaySelection(const EdModel *m,EdVec origin,EdVec direction,EdHit *hit);
+int edRaySurface(const EdModel *m,EdVec origin,EdVec direction,EdHit *hit,int adjoins);
 /* Paint visible adjoins while passing through invisible portal faces. */
 int edRayMaterial(const EdModel *m,EdVec origin,EdVec direction,EdHit *hit);
 double edVertexLight(const EdModel *model,int cell,int face,int vertex);
 int edCleaveFacePlane(EdModel *m,int cell,int face,EdVec normal,EdVec point);
 int edCleave(EdModel *m,int cell,int face,EdVec start,EdVec end);
+int edBevelSelection(EdModel*,const EdModel*,const EdSelection*,double width);
+int edBevel(EdModel *out,const EdModel *source,EdHit hit,double width);
+int edCleaveSelection(EdModel *m,const EdSelection *selection);
+int edGenerateSlashGrate(EdModel *m,EdHit hit,int material,const EdPlacedCog &script);
 int edShapePoints(const EdFace *face,EdVec center,double radius,int sides,double degrees,EdVec points[32]);
 /* Shared by preview and cleave. Returns 1 for an area intersection, 0 for no
    intersection/invalid input, -1 if clipping exhausts working storage. */
@@ -221,4 +233,6 @@ void edCogThingChanged(EdModel *model,int index,int inserted);
 int edCogDelete(EdModel *model,int index);
 int edMeshDissolve(EdModel*,EdHit);
 void edComputeVertexLights(const EdModel*,std::vector<double>&);
+int edSetWind(EdModel *model,int sector,EdVec thrust);
+int edCreateSpiralStairs(EdModel *out,const EdModel *source,int sector,int steps,double rotation=0,int post=0,double gap=0);
 #endif

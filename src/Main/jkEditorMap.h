@@ -13,6 +13,11 @@ static double mapZoom,mapX,mapY,mapStartX,mapStartY;
 static int mapWidth=640,mapHeight=480,mapLeft,mapRight,mapCopyDown,mapPasteDown,mapHistoryDown,mapBox,mapDragging;
 static uint32_t mapMoveType;
 static int mapGeometryDrag;
+static std::vector<int> mapThings,mapGrabThings;
+static int mapPickThing(EdVec point);
+static int mapSelectThings(EdVec a,EdVec b,int box);
+static int mapMoveThings(EdVec rawDelta,EdVec *delta);
+static void mapDrawThings(void);
 static int mapClickTracking,mapClickReady,mapClickConsumed;
 static uint32_t mapClickTime;
 static double mapClickX,mapClickY;
@@ -22,7 +27,7 @@ static int mapDeselectClick(int left,int blocked,uint32_t now){
     if(blocked){mapClickTracking=mapClickReady=0;return 0;}
     if(left&&!mapLeft){
         if(mapClickReady&&now-mapClickTime<=300&&hypot(mapX-mapClickX,mapY-mapClickY)<=4){
-            mapSelected.clear();sectorPicks.clear();picks.count=0;splineSelected=0;splinePoint=-1;mapBox=0;
+            mapThings.clear();mapSelected.clear();sectorPicks.clear();picks.count=0;splineSelected=0;splinePoint=-1;mapBox=0;
             mapClickTracking=mapClickReady=0;mapClickConsumed=1;say("Selection cleared.");return 1;
         }
         mapClickReady=0;mapClickTracking=1;mapClickTime=now;mapClickX=mapX;mapClickY=mapY;
@@ -87,7 +92,7 @@ static void mapSize(void){rdCanvas *canvas=Video_pCanvas;
 }
 static void mapCancel(void){splineDrawing=splineDragging=0;mapUnplaced=mapDrawing=mapBox=mapCleaveMode=mapCleaveDragged=0;if(mapDragging)grabbing=0;mapDragging=0;}
 static void mapEscape(void){if(splineDrawing||splineDragging){splineFinish();return;}mapCancel();say("Map drawing / placement / cleave cancelled.");}
-static void mapInvalidate(void){sectorPicks.clear();edZero(mapSelected,0,sizeof(mapSelected));mapCancel();}
+static void mapInvalidate(void){mapThings.clear();mapGrabThings.clear();sectorPicks.clear();edZero(mapSelected,0,sizeof(mapSelected));mapCancel();}
 static int mapAllocatePending(void){if(!mapPending)mapPending=edCalloc(1,sizeof(*mapPending));if(!mapPending){say("Could not allocate a sector preview.");return 0;}return 1;}
 static EdVec mapSelectionDelta(const EdModel *source,const EdSelection *selection,EdVec delta){
     if(edDot(delta,delta)<=ED_EPS*ED_EPS)return edV(0,0,0);
@@ -189,6 +194,7 @@ static void mapStopPlayer(SithThing *p){
     rdVector_Zero3(&p->physicsParams.deltaVelocity);rdVector_Zero3(&p->physicsParams.angularVelocity);
 }
 static void mapOpen(SithThing *p){
+    mapThings.clear();mapGrabThings.clear();
     mapClickTracking=mapClickReady=mapClickConsumed=0;
     mapMiddleDown=stdControl_ReadKey(KEY_MOUSE_B3,NULL)!=0;mapView=0;mapSize();mapCenter=vec(p->position);mapZoom=fmin(mapWidth,mapHeight)/3.0;mapX=mapWidth*.5;mapY=mapHeight*.5;
     mapMoveType=p->moveType;if(p->attach_flags)sithThing_DetachThing(p);mapStopPlayer(p);
@@ -196,7 +202,7 @@ static void mapOpen(SithThing *p){
     mapFloorZ=floor(p->position.z);for(int s=0;s<model->count;s++)if(edContains(&model->c[s],vec(p->position))){mapFloorZ=1e30;for(int f=0;f<model->c[s].count;f++)for(int v=0;v<model->c[s].f[f].count;v++)mapFloorZ=fmin(mapFloorZ,model->c[s].f[f].v[v].p.z);break;}
     mapFloorZ=edSnapPoint(edV(0,0,mapFloorZ)).z;mapInsertDown=stdControl_ReadKey(DIK_INSERT,NULL)!=0;
     mapBackDown=stdControl_ReadKey(DIK_BACK,NULL)!=0;
-    mapCleaveDown=stdControl_ReadKey(DIK_C,NULL)!=0;mapDeleteDown=stdControl_ReadKey(DIK_DELETE,NULL)!=0;
+    mapCleaveDown=(stdControl_ReadKey(DIK_C,NULL)||stdControl_ReadKey(DIK_SLASH,NULL)||stdControl_ReadKey(DIK_DIVIDE,NULL))!=0;mapDeleteDown=stdControl_ReadKey(DIK_DELETE,NULL)!=0;
     mapLeft=stdControl_ReadKey(KEY_MOUSE_B1,NULL)!=0;mapRight=stdControl_ReadKey(KEY_MOUSE_B2,NULL)!=0;
     mapCopyDown=stdControl_ReadKey(DIK_C,NULL)!=0;mapPasteDown=stdControl_ReadKey(DIK_V,NULL)!=0;mapHistoryDown=0;
     /* Share exact 3D handles, rather than expanding them to entire sectors. */
@@ -256,14 +262,16 @@ static void mapInput(double dx,double dy,int wheel,int left,int right,int space,
     if(left&&!mapLeft&&!space&&!right){mapBox=1;mapStartX=mapX;mapStartY=mapY;}
     if(!left&&mapLeft&&mapBox){
         EdVec a=mapPoint(mapStartX,mapStartY),b=mapPoint(mapX,mapY);int box=fabs(mapX-mapStartX)>4||fabs(mapY-mapStartY)>4;
-        EdSelection hit={0};if(!box)mapPickGeometry(b,&hit);
+        if(mapSelectThings(a,b,box)){mapBox=0;goto buttons;}
+        mapThings.clear();EdSelection hit={0};if(!box)mapPickGeometry(b,&hit);
         edZero(mapSelected,0,sizeof(mapSelected));
         if(hit.count){for(int i=0;i<hit.count;i++)if(!edSelectionToggle(model,&picks,hit.hits[i]))say("Selection limit reached.");}
         else {picks.count=0;for(int s=0;s<model->count;s++)if(mapSectorHit(model->c[s],a,b,box))mapSelected[s]=1;}mapBox=0;
     }
     if(right&&!mapRight&&!space&&!left&&!busy){int any=0;for(int s=0;s<model->count;s++)any|=mapSelected[s];
-        if((any||picks.count)&&!mapSplineGeometrySelected()){remember();edCopyModel(snapshot,model);mapGeometryDrag=!any&&picks.count;grabPicks=picks;edCopy(mapGrabSelected,mapSelected,sizeof(mapSelected));mapGrabPoint=mapPoint(mapX,mapY);mapLastDelta=edV(0,0,0);mapDragging=grabbing=1;}}
+        if((!mapThings.empty()||any||picks.count)&&(!mapThings.empty()||!mapSplineGeometrySelected())){remember();edCopyModel(snapshot,model);mapGeometryDrag=!mapThings.empty()?2:!any&&picks.count;mapGrabThings=mapThings;grabPicks=picks;edCopy(mapGrabSelected,mapSelected,sizeof(mapSelected));mapGrabPoint=mapPoint(mapX,mapY);mapLastDelta=edV(0,0,0);mapDragging=grabbing=1;}}
     if(right&&mapDragging&&!space){EdVec rawDelta=edSub(mapPoint(mapX,mapY),mapGrabPoint);
+        if(mapGeometryDrag==2){EdVec delta;if(mapMoveThings(rawDelta,&delta)&&edDot(edSub(delta,mapLastDelta),edSub(delta,mapLastDelta))>ED_EPS*ED_EPS&&commit())mapLastDelta=delta;goto buttons;}
         EdVec delta=mapGeometryDrag?mapSelectionDelta(snapshot,&grabPicks,rawDelta):mapSnapXY(rawDelta);EdBuffer<unsigned char> selected;
         /* Each frame starts from the gesture snapshot, avoiding cumulative drift. */
         if(edDot(edSub(delta,mapLastDelta),edSub(delta,mapLastDelta))>ED_EPS*ED_EPS){
@@ -281,7 +289,7 @@ static void mapControl(SithThing *p){
     int tab=stdControl_ReadKey(DIK_TAB,NULL)!=0;if(tab&&!tabDown){tabDown=tab;mapClose(p);return;}tabDown=tab;
     for(int view=0;view<6;view++)if(stdControl_ReadKey(DIK_1+view,NULL))mapSetView(view);
     int ctrl=stdControl_ReadKey(DIK_LCONTROL,NULL)||stdControl_ReadKey(DIK_RCONTROL,NULL),shift=stdControl_ReadKey(DIK_LSHIFT,NULL)||stdControl_ReadKey(DIK_RSHIFT,NULL);
-    int c=stdControl_ReadKey(DIK_C,NULL)!=0,deleting=stdControl_ReadKey(DIK_DELETE,NULL)!=0;
+    int c=(stdControl_ReadKey(DIK_C,NULL)||stdControl_ReadKey(DIK_SLASH,NULL)||stdControl_ReadKey(DIK_DIVIDE,NULL))!=0,deleting=stdControl_ReadKey(DIK_DELETE,NULL)!=0;
     if(c&&!mapCleaveDown&&!ctrl)mapBeginCleave();mapCleaveDown=c;
     if(deleting&&!mapDeleteDown&&!splineDeleteSelected())mapDeleteSelected(p);mapDeleteDown=deleting;
     int inserting=stdControl_ReadKey(DIK_INSERT,NULL)!=0;if(inserting&&!mapInsertDown)mapInsert();mapInsertDown=inserting;
@@ -303,6 +311,7 @@ static void mapMarker(EdVec point,int first,int color){point=mapProject(edSub(po
 }
 #include "jkEditorGroups.h"
 #include "jkEditorSplineMap.h"
+#include "jkEditorMapThings.h"
 static void mapDraw(void){
     mapSize();tVBuffer *buffer=highlightCanvas->pVBuffer;int black=mapColor(0,0,0),grid=mapColor(48,48,48),green=mapColor(32,255,64),selected=mapColor(255,48,48),cursor=mapColor(240,240,240);
     /* The ordinary HUD (including the crosshair and chat) was drawn before
@@ -321,7 +330,7 @@ static void mapDraw(void){
         const EdFace *face=&model->c[s].f[f];for(int v=0;v<face->count;v++){EdVec a=face->v[v].p,b=face->v[(v+1)%face->count].p;
             mapWorldLine(a,b,pass?selected:green,pass?3:1);}}
     for(int s=0;s<model->count;s++)for(int f=0;f<model->c[s].count;f++)for(int v=0;v<model->c[s].f[f].count;v++)mapMarker(model->c[s].f[f].v[v].p,0,mapSelected[s]?selected:green);
-    splineMapDraw();
+    splineMapDraw();mapDrawThings();
     /* Draw exact 3D selections last so overlapping heights remain visible. */
     for(int i=0;i<picks.count;i++){
         EdHit h=picks.hits[i];if(h.cell<0||h.cell>=model->count||h.face<0||h.face>=model->c[h.cell].count)continue;
@@ -340,7 +349,7 @@ static void mapDraw(void){
     if(mapBox){mapLine(mapStartX,mapStartY,mapX,mapStartY,cursor,1);mapLine(mapX,mapStartY,mapX,mapY,cursor,1);mapLine(mapX,mapY,mapStartX,mapY,cursor,1);mapLine(mapStartX,mapY,mapStartX,mapStartY,cursor,1);}
     mapLine(mapX-9,mapY,mapX+9,mapY,cursor,1);mapLine(mapX,mapY-9,mapX,mapY+9,cursor,1);
     char label[160];int count=0;for(int s=0;s<model->count;s++)count+=mapSelected[s]!=0;
-    snprintf(label,sizeof(label),"MAP %s | Mirror:%s%s%s | Grid: %.0fx | %d sectors | %d sectors / %d handles selected | Tab: 3D",mapViewNames[mapView],mapMirrorAxes&1?"X":"",mapMirrorAxes&2?"Y":"",mapMirrorAxes&4?"Z":"",spacing/ED_GRID,model->count,count,picks.count);editorDrawText(buffer,jkGui_stdFonts[0],12,12,mapWidth-24,label,1);
+    snprintf(label,sizeof(label),"MAP %s | Mirror:%s%s%s | Grid: %.0fx | %d sectors | %d sectors / %d handles / %d things selected | Tab: 3D",mapViewNames[mapView],mapMirrorAxes&1?"X":"",mapMirrorAxes&2?"Y":"",mapMirrorAxes&4?"Z":"",spacing/ED_GRID,model->count,count,picks.count,(int)mapThings.size());editorDrawText(buffer,jkGui_stdFonts[0],12,12,mapWidth-24,label,1);
     editorDrawText(buffer,jkGui_stdFonts[0],12,34,mapWidth-24,"1 Top | 2 Front | 3 Left | 4 Bottom | 5 Back | 6 Right | Middle: options",1);
     editorDrawText(buffer,jkGui_stdFonts[0],12,56,mapWidth-24,"LMB select / box | RMB move | Space pan | Wheel zoom | Ctrl+C/V copy/paste",1);
     editorDrawText(buffer,jkGui_stdFonts[0],12,78,mapWidth-24,"Enter: groups/arrays | S spline | C cleave | Delete | Shift+LMB draw | Insert new",1);
@@ -404,7 +413,7 @@ static int mapSelfTest(SithThing *p){
     rdMatrix34 orientation=p->orient;int oldX=stdControl_aAxisStates[AXIS_MOUSE_X],oldY=stdControl_aAxisStates[AXIS_MOUSE_Y];
     stdControl_aAxisStates[AXIS_MOUSE_X]=15;stdControl_aAxisStates[AXIS_MOUSE_Y]=10;p->physicsParams.vel.x=1;mapControl(p);
     int isolated=!edCompare(&orientation,&p->orient,sizeof(orientation))&&rdVector_IsZero3(&p->physicsParams.vel)&&p->moveType==SITH_MT_NONE;
-    stdControl_aAxisStates[AXIS_MOUSE_X]=oldX;stdControl_aAxisStates[AXIS_MOUSE_Y]=oldY;mapX=mapWidth*.5;mapY=mapHeight*.5;
+    stdControl_aAxisStates[AXIS_MOUSE_X]=oldX;stdControl_aAxisStates[AXIS_MOUSE_Y]=oldY;mapX=mapWidth*.5+.3*mapZoom;mapY=mapHeight*.5-.3*mapZoom;
     mapInput(0,0,0,1,0,0,0,0,0,0);mapInput(0,0,0,0,0,0,0,0,0,0);int ok=retained&&isolated&&mapActive&&mapSelected[0]&&p->moveType==SITH_MT_NONE;
     mapInput(0,0,0,0,0,0,0,1,0,0);mapInput(mapZoom*3,0,0,0,0,0,0,0,0,0);mapInput(0,0,0,0,0,0,0,0,1,0);
     ok=ok&&mapUnplaced&&model->count==saved->count&&!undoCount;

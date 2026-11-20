@@ -1,9 +1,25 @@
+static void splineSurfaceFlags(EdModel &model,const EdSpline &settings){
+    if(!settings.surfaceFlagsMask)return;
+    for(int c=0;c<model.count;c++)if(model.c[c].splineId==settings.id)for(int f=0;f<model.c[c].count;f++){
+        EdFace &face=model.c[c].f[f];if(face.neighbor>=0)continue;face.attributes=edSurfaceAttributes(&face);face.hasAttributes=1;
+        face.attributes.surfaceFlags=(face.attributes.surfaceFlags&~settings.surfaceFlagsMask)|(settings.surfaceFlags&settings.surfaceFlagsMask);
+    }
+}
 /* Included after the convex geometry implementation. */
 EdVec edSplinePosition(const EdSpline *s,double t){
     if(s->count<2)return s->count?s->points[0].position:edV(0,0,0);
     int spans=s->closed?s->count:s->count-1;t=fmax(0,fmin(spans,t));int i=(int)t;if(i>=spans)i=spans-1;t-=i;double u=1-t;
     const EdSplinePoint &a=s->points[i],&b=s->points[(i+1)%s->count];
     return edAdd(edAdd(edScale(a.position,u*u*u),edScale(edAdd(a.position,a.handle),3*u*u*t)),edAdd(edScale(edSub(b.position,b.handle),3*u*t*t),edScale(b.position,t*t*t)));
+}
+static EdVec splineWindVector(const EdSpline &s,EdVec center){
+    int spans=s.closed?s.count:s.count-1,samples=spans*64;double best=1e100,t=0;
+    EdVec a=edSplinePosition(&s,0);
+    for(int i=0;i<samples;i++){EdVec b=edSplinePosition(&s,(double)(i+1)*spans/samples),edge=edSub(b,a);double length2=edDot(edge,edge);
+        double u=length2>1e-16?fmax(0,fmin(1,edDot(edSub(center,a),edge)/length2)):0;
+        EdVec d=edSub(center,edAdd(a,edScale(edge,u)));if(edDot(d,d)<best){best=edDot(d,d);t=(i+u)*spans/samples;}a=b;
+    }
+    EdVec tangent=edSub(edSplinePosition(&s,t+.0001),edSplinePosition(&s,t-.0001));return edScale(unit(tangent),s.windSpeed);
 }
 static unsigned splineHash(const EdModel *m,int id){
     unsigned hash=2166136261u;for(int i=0;i<m->count;i++)if(m->c[i].splineId==id){EdCell c=m->c[i];
@@ -16,6 +32,7 @@ int edSplineValidate(const EdModel *m){
     for(int i=0;i<m->splineCount;i++){const EdSpline &s=m->splines[i];
         if(s.groupId<0||s.groupId>m->groupCount||s.mirrorAxes<0||s.mirrorAxes>7||(s.closed!=0&&s.closed!=1)||(s.closed&&s.count<3)||s.id<=0||s.count<1||s.count>ED_SPLINE_POINTS||s.sides<3||s.sides>32||s.segments<1||s.segments>ED_SPLINE_SECTORS||s.material<0||!isfinite(s.width)||!isfinite(s.height)||s.width<ED_GRID||s.height<ED_GRID||s.width>1000||s.height>1000)return 0;
         if(s.makeWalkstruct<0||s.makeWalkstruct>1||!memchr(s.walkstructName,0,32)||(s.walkstructName[0]&&!templateToken(s.walkstructName,32)))return 0;
+        if(!isfinite(s.windSpeed)||fabs(s.windSpeed)>100||(s.makeWalkstruct&&s.windSpeed!=0))return 0;
         if(s.hasSectorTint<0||s.hasSectorTint>1)return 0;
         for(double value:{s.sectorTint.x,s.sectorTint.y,s.sectorTint.z})if(!isfinite(value)||value<0||value>1)return 0;
         if(s.sectorFlagsMask&0x1000u)return 0; // Collision bounds are engine-managed.
@@ -151,6 +168,7 @@ static int splineWalkstruct(EdModel *work,int index,int first){
     for(int c=0;c<solid.count;c++){solid.c[c]=work->c[first+c];solid.c[c].splineId=0;solid.c[c].arrayId=0;for(int f=0;f<solid.c[c].count;f++)solid.c[c].f[f].neighbor=solid.c[c].f[f].mirror=-1;}
     // Resolve only the generated volume; surrounding level geometry is untouched.
     if(!edResolve(&solid))return 0;
+    EdSpline surfaceSettings=s;surfaceSettings.id=0;splineSurfaceFlags(solid,surfaceSettings);
     if(!s.walkstructName[0])for(int suffix=0;;suffix++){
         char name[32];snprintf(name,sizeof(name),"spline%d_%d",s.id,suffix);int used=edTemplateIndex(work,name)>=0;
         for(int a=0;a<work->assetCount;a++)used|=!strcmp(work->assets[a].name,name);
@@ -191,6 +209,7 @@ static int splineBuild(EdModel *out,const EdModel *source,const EdSpline *spline
     EdBuffer<int> remap;int count=0;
     for(int i=0;i<work.count;i++){remap[i]=work.c[i].splineId==settings.id?-1:count;if(remap[i]>=0)work.c[count++]=work.c[i];}
     for(int c=0;c<work.cogCount;c++)for(int p=0;p<work.cogs[c].count;p++){EdCogParam &v=work.cogs[c].params[p];if((v.type==ED_COG_SECTOR||v.type==ED_COG_SURFACE)&&v.cell>=0&&v.cell<work.count){v.cell=remap[v.cell];if(v.cell<0)v.face=-1;}}
+    windPrune(&work);
     work.count=count;work.c.resize(count);
     EdBuffer<EdCell> background=work.c;
     if(settings.count>=2){
@@ -326,9 +345,10 @@ static int splineBuild(EdModel *out,const EdModel *source,const EdSpline *spline
     }
     }
     for(int c=count;c<work.count;c++)if(work.c[c].splineId==settings.id){work.c[c].flags=(work.c[c].flags&~settings.sectorFlagsMask)|(settings.sectorFlags&settings.sectorFlagsMask);if(settings.hasSectorTint)work.c[c].tint=settings.sectorTint;}
+    if(settings.windSpeed!=0)for(int c=count;c<work.count;c++)if(work.c[c].splineId==settings.id){EdVec center={};int vertices=0;for(int f=0;f<work.c[c].count;f++)for(int v=0;v<work.c[c].f[f].count;v++){center=edAdd(center,work.c[c].f[f].v[v].p);vertices++;}work.c[c].thrust=splineWindVector(settings,edScale(center,1.0/vertices));work.c[c].flags|=8u;}
     int primaryCount=work.count;
     for(int mask=1;mask<8;mask++)if((mask&settings.mirrorAxes)==mask)for(int c=0;c<primaryCount;c++)if(work.c[c].splineId==settings.id){
-        if(work.count>=ED_CELLS)return 0;EdCell reflected=work.c[c];int reverse=((mask&1)!=0)^((mask&2)!=0)^((mask&4)!=0);
+        if(work.count>=ED_CELLS)return 0;EdCell reflected=work.c[c];if(mask&1)reflected.thrust.x=-reflected.thrust.x;if(mask&2)reflected.thrust.y=-reflected.thrust.y;if(mask&4)reflected.thrust.z=-reflected.thrust.z;int reverse=((mask&1)!=0)^((mask&2)!=0)^((mask&4)!=0);
         for(int f=0;f<reflected.count;f++){EdFace &face=reflected.f[f];for(int v=0;v<face.count;v++){EdVec &p=face.v[v].p;if(mask&1)p.x=-p.x;if(mask&2)p.y=-p.y;if(mask&4)p.z=-p.z;}
             if(reverse)for(int v=0;v<face.count/2;v++)std::swap(face.v[v],face.v[face.count-1-v]);}
         work.c[work.count++]=std::move(reflected);
@@ -340,10 +360,12 @@ static int splineBuild(EdModel *out,const EdModel *source,const EdSpline *spline
     for(int c=0;c<work.count;c++)for(int f=0;f<work.c[c].count;f++){EdFace &face=work.c[c].f[f];face.attributes=edSurfaceAttributes(&face);face.hasAttributes=1;face.neighbor=face.mirror=-1;}
     if(preview&&preview->size()==0)for(int c=count;c<work.count;c++)(*preview)[preview->size()]=work.c[c];
     if(!edResolve(&work))return 0;
+    splineSurfaceFlags(work,settings);
     for(int c=0;c<count&&c<work.count;c++)if(!splineSameCell(background[c],work.c[c])){
         size_t p=work.splines[index].cutBefore.size();work.splines[index].cutBefore[p]=background[c];work.splines[index].cutAfter[p]=work.c[c];
     }
 
+    if(settings.windSpeed!=0)for(int c=0;c<work.count;c++)if(work.c[c].splineId==settings.id&&!edSetWind(&work,c,work.c[c].thrust))return 0;
     work.splines[index].geometryHash=splineHash(&work,settings.id);edSplineReconcile(&work);
     if(!edValidate(&work))return 0;edCopyModel(out,&work);return 1;
 }
@@ -382,6 +404,7 @@ int edSplineUpdate(EdModel *out,const EdModel *source,const EdSpline *spline,int
     EdBuffer<int> remap;int count=0;
     for(int c=0;c<base.count;c++){remap[c]=base.c[c].splineId?-1:count;if(remap[c]>=0)base.c[count++]=base.c[c];}
     for(int c=0;c<base.cogCount;c++)for(int p=0;p<base.cogs[c].count;p++){EdCogParam &v=base.cogs[c].params[p];if((v.type==ED_COG_SECTOR||v.type==ED_COG_SURFACE)&&v.cell>=0&&v.cell<base.count){v.cell=remap[v.cell];if(v.cell<0)v.face=-1;}}
+    windPrune(&base);
     base.count=count;base.c.resize(count);
     if(selected<0){if(base.splineCount>=ED_SPLINES)return 0;selected=base.splineCount++;}base.splines[selected]=*spline;
     if(!edSplineValidate(&base))return 0;
@@ -399,7 +422,9 @@ void edSplineReadMetadata(EdModel *m,const char *text){
         const char *end=strchr(cursor,'\n');std::string row(cursor,end?(size_t)(end-cursor):strlen(cursor));cursor=end?end+1:nullptr;const char *line=row.c_str();EdSpline s={};int id,point,cell;EdSplinePoint p={};
         if(sscanf(line,"# GeoSith spline %d %d %d %d %lf %lf",&s.id,&s.sides,&s.segments,&s.material,&s.width,&s.height)==6&&m->splineCount<ED_SPLINES)m->splines[m->splineCount++]=s;
         char walkName[32];if(sscanf(line,"# GeoSith splinewalkstruct %d %31s",&id,walkName)==2)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id){m->splines[i].makeWalkstruct=1;if(strcmp(walkName,"-"))snprintf(m->splines[i].walkstructName,32,"%s",walkName);}
+        double wind;if(sscanf(line,"# GeoSith splinewind %d %lf",&id,&wind)==2)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id)m->splines[i].windSpeed=wind;
         EdVec tint;if(sscanf(line,"# GeoSith splinetint %d %lf %lf %lf",&id,&tint.x,&tint.y,&tint.z)==4)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id){m->splines[i].hasSectorTint=1;m->splines[i].sectorTint=tint;}
+        unsigned int surfaceFlags,surfaceMask;if(sscanf(line,"# GeoSith splinesurfaceflags %d %x %x",&id,&surfaceFlags,&surfaceMask)==3)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id){m->splines[i].surfaceFlags=surfaceFlags;m->splines[i].surfaceFlagsMask=surfaceMask;}
         unsigned int flags,mask;if(sscanf(line,"# GeoSith splineflags %d %x %x",&id,&flags,&mask)==3)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id){m->splines[i].sectorFlags=flags;m->splines[i].sectorFlagsMask=mask&~0x1000u;}
         int group;if(sscanf(line,"# GeoSith splinegroup %d %d",&id,&group)==2)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id)m->splines[i].groupId=group;
         int axes;if(sscanf(line,"# GeoSith splinemirror %d %d",&id,&axes)==2)for(int i=0;i<m->splineCount;i++)if(m->splines[i].id==id)m->splines[i].mirrorAxes=axes;

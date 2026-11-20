@@ -364,7 +364,10 @@ static void builderControl(int fire,int grab,int middle,int shift,int ctrl){
         if(tool==9){EdVec center=builderPlacementPoint(origin,direction);
             remember();edCopyModel(candidate,model);if(edMeshPrimitiveTransformedDetail(candidate,builderAsset,builderPrimitive,center,currentMaterial,builderSize,builderRotation,builderDetail[builderPrimitive],builderGrid)&&commit())say("Primitive placed as a new mesh.");else say("Cannot add primitive: mesh/vertex limit reached.");}
         else if(tool==1){if(doubleClick){builderPicks.count=0;builderMeshPicks.clear();}else if(builderHover.cell>=0&&ctrl){builderPicks.count=0;int m=builderHover.cell;if(builderMeshPicks.count(m))builderMeshPicks.erase(m);else builderMeshPicks.insert(m);say("Mesh selected. RMB move | Ctrl+C copy | Ctrl+V paste | I invert.");}else if(builderHover.cell>=0){builderMeshPicks.clear();int found=-1;for(int i=0;i<builderPicks.count;i++)if(builderSameHit(builderPicks.hits[i],builderHover)){found=i;break;}if(found>=0){memmove(builderPicks.hits+found,builderPicks.hits+found+1,(--builderPicks.count-found)*sizeof(EdHit));}else if(builderPicks.count<ED_SELECTIONS)builderPicks.hits[builderPicks.count++]=builderHover;}}
-        else if(tool==2&&builderHover.cell>=0){remember();edCopyModel(candidate,model);applyFaceMaterial(&candidate->meshes[builderHover.cell].geometry.f[builderHover.face],currentMaterial);edCompactDecals(candidate);commit();}
+        else if(tool==2&&builderHover.cell>=0){
+            if(shift){clipboard=currentMaterial=model->meshes[builderHover.cell].geometry.f[builderHover.face].material;say("Material copied.");}
+            else{remember();edCopyModel(candidate,model);applyFaceMaterial(&candidate->meshes[builderHover.cell].geometry.f[builderHover.face],currentMaterial);edCompactDecals(candidate);commit();}
+        }
         else if(tool==10&&builderHover.cell>=0){builderGrab=builderHover;builderStart=builderEnd=edSnapMeshFacePoint(&model->meshes[builderGrab.cell].geometry.f[builderGrab.face],builderHover.point,builderGrid);cleaving=1;}
     }
     if(cleaving){const EdFace *face=&model->meshes[builderGrab.cell].geometry.f[builderGrab.face];EdVec hit;if(edTracePlane(origin,direction,builderStart,edNormal(face),&hit))builderEnd=edSnapMeshFacePoint(face,hit,builderGrid);

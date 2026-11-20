@@ -36,10 +36,10 @@ static void captureSurfaceFlags(jkGuiMenu *menu) {
 #endif
     menu->lastClicked=1;
 }
-static void surfaceFlagsDialog(EdFace *draft,int count,int field) {
+static unsigned int surfaceFlagsDialog(EdFace *draft,int count,int field) {
     unsigned int common=~0u,combined=0;int eligible=0;
     for(int i=0;i<count;i++)if(field!=7||draft[i].neighbor>=0){unsigned int bits=*surfaceFlagValue(&draft[i],field);common&=bits;combined|=bits;eligible++;}
-    if(!eligible){jkGuiDialog_ErrorDialog(u"Adjoin Flags",u"The selected surfaces have no adjoins.\nConnect sectors with geometry before editing adjoin flags.");return;}
+    if(!eligible){jkGuiDialog_ErrorDialog(u"Adjoin Flags",u"The selected surfaces have no adjoins.\nConnect sectors with geometry before editing adjoin flags.");return 0;}
     const char **names=field==8?surfaceFlagNames:field==9?faceFlagNames:adjoinFlagNames;
     jkGuiElement elements[37]={0};char16_t labels[32][96];
     elements[0]=jkGuiElement{ELEMENT_TEXT,0,2,NULL,3,{20,8,600,40},1};
@@ -67,6 +67,7 @@ static void surfaceFlagsDialog(EdFace *draft,int count,int field) {
         for(int i=0;i<count;i++)if(field!=7||draft[i].neighbor>=0){unsigned int *bits=surfaceFlagValue(&draft[i],field);*bits=(*bits&~surfaceFlagsTouched)|(value&surfaceFlagsTouched);}
     }
     freeMenuStrings(elements);
+    return choice==1?surfaceFlagsTouched:0;
 }
 static double surfaceNumeric(const EdFace *face,int field) {
     const EdSurfaceAttributes *a=&face->attributes;
@@ -88,9 +89,25 @@ static void captureStairsAttributes(jkGuiMenu *menu) {
 #endif
     menu->lastClicked=300;
 }
+static int surfaceGenerateMenu(char16_t *steps){
+    jkGuiElement e[]={
+        {ELEMENT_TEXT,0,2,NULL,3,{20,25,600,40},1},
+        {ELEMENT_TEXTBUTTON,300,2,NULL,3,{70,130,300,40},1},
+        {ELEMENT_TEXT,0,0,NULL,3,{390,110,180,25},1},
+        {ELEMENT_TEXTBOX,0,0,NULL,15,{410,145,140,28},1},
+        {ELEMENT_TEXTBUTTON,302,2,NULL,3,{70,220,500,40},1},
+        {ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{180,410,280,40},1},
+        {ELEMENT_TEXTBUTTON,303,2,NULL,3,{70,285,500,40},1},{ELEMENT_END}};
+    jkGuiMenu menu={e,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);
+    e[0].wstr=u"Generate";e[1].wstr=u"Create Stairs";e[2].wstr=u"Stair steps";e[3].wstr=steps;e[4].wstr=u"Slash Grate";e[6].wstr=u"Conveyor Belt";
+    if(getenv("GEOSITH_STAIRS_CAPTURE")&&getenv("GEOSITH_STRESS")&&!strcmp(jkRes_episodeGobName,"sithed_smoke"))menu.idkFunc=captureStairsAttributes;
+    if(getenv("GEOSITH_CONVEYOR_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=conveyorMenuTest;
+    jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&e[5]);int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(e);return choice;
+}
 static void surfaceAttributesDialog(void) {
     if(!allSelectedSurfaces(&picks)){say("Select one or more surfaces with weapon 1 first.");return;}
     int count=picks.count;EdSelection selected=picks;EdFace *draft=edCalloc(count,sizeof(*draft));if(!draft)return;
+    auto original=std::make_unique<EdModel>(*model);
     std::vector<int> surfaceNumbers(count);
     for(int i=0;i<count;i++){EdHit h=selected.hits[i];int number=h.face;for(int s=0;s<h.cell;s++)number+=model->c[s].count;surfaceNumbers[i]=number;}
     char16_t stairSteps[16];double stairRise=1,stairRun=1;
@@ -121,17 +138,18 @@ static void surfaceAttributesDialog(void) {
         elements[25]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{24,370,592,24},1};
         elements[26]=jkGuiElement{ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,430,230,36},1};
         elements[27]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,430,230,36},1};elements[28]=jkGuiElement{ELEMENT_TEXTBUTTON,300,0,NULL,3,{314,395,302,28},1};
-        elements[29]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{24,397,176,24},1};
-        elements[30]=jkGuiElement{ELEMENT_TEXTBOX,0,0,NULL,3,{218,395,84,26},1};
+        elements[29]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{24,397,176,24},0};
+        elements[30]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{218,395,84,26},0};
         elements[31]=jkGuiElement{ELEMENT_TEXTBUTTON,301,0,NULL,3,{160,40,320,22},count>1};elements[32].type=ELEMENT_END;
         jkGuiMenu menu={elements,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};
         jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);elements[0].wstr=title;
         elements[31].wstr=u"View selected surface numbers...";
         for(int i=0;i<12;i++){elements[1+i].wstr=labels[i];elements[13+i].wstr=values[i];}
         elements[25].wstr=u"Mixed values stay unchanged unless edited. Click modes or flags.";elements[26].wstr=u"Apply";
-        elements[28].wstr=u"Create Stairs";elements[29].wstr=u"Stair steps";elements[30].wstr=stairSteps;
+        elements[28].wstr=u"Generate";
         if(getenv("GEOSITH_SURFACE_CAPTURE")&&getenv("GEOSITH_STRESS")&&!strcmp(jkRes_episodeGobName,"sithed_smoke"))menu.idkFunc=captureSurfaceAttributes;
         if(getenv("GEOSITH_STAIRS_CAPTURE")&&getenv("GEOSITH_STRESS")&&!strcmp(jkRes_episodeGobName,"sithed_smoke"))menu.idkFunc=captureStairsAttributes;
+        if(getenv("GEOSITH_CONVEYOR_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=conveyorMenuTest;
         jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&elements[27]);jkGuiRend_MenuSetReturnKeyShortcutElement(&menu,&elements[26]);
         int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(elements);if(choice<0)break;
         int valid=1;EdFace *next=edAlloc(count*sizeof(*next));if(!next)break;edCopy(next,draft,count*sizeof(*next));
@@ -144,6 +162,22 @@ static void surfaceAttributesDialog(void) {
         }
         if(!valid){edFree(next);jkGuiDialog_ErrorDialog(u"Surface Attributes",u"Enter a known material name and finite numbers.\nScales must be nonzero; adjoin distance cannot be negative.");continue;}
         edCopy(draft,next,count*sizeof(*next));edFree(next);
+        if(choice==300){
+            choice=surfaceGenerateMenu(stairSteps);if(choice<0)continue;
+            if(netEditPending()||!edModelsEqual(original.get(),model)){say("Level changed or an edit is pending. Reopen surface attributes.");break;}
+        }
+        if(choice==303){if(conveyorStart(selected,draft))break;continue;}
+        if(choice==302){
+            if(netEditPending()){jkGuiDialog_ErrorDialog(u"Slash Grate",u"Wait for the pending edit to finish.");continue;}
+            EdHit h=selected.hits[0];EdFace &face=model->c[h.cell].f[h.face];
+            if(face.neighbor<0||count>2||(count==2&&(selected.hits[1].cell!=face.neighbor||selected.hits[1].face!=face.mirror))){jkGuiDialog_ErrorDialog(u"Slash Grate",u"Select one adjoin, or both sides of the same adjoin.");continue;}
+            int material=-1;for(int i=0;i<paletteCount;i++)if(!__strcmpi(paletteNames[i],"08tgrate.mat")){material=i;break;}
+            EdPlacedCog cog={};char *script=cogSourceText("00_slashgrate.cog");int parsed=script&&edCogParseScript(&cog,"00_slashgrate.cog",script);edFree(script);
+            if(material<0||!editorMaterial(material)||!parsed){jkGuiDialog_ErrorDialog(u"Slash Grate",u"Could not load 08tgrate.mat or 00_slashgrate.cog from the game resources.");continue;}
+            edCopyModel(candidate,model);for(int i=0;i<count;i++){EdHit p=selected.hits[i];candidate->c[p.cell].f[p.face]=draft[i];}
+            if(!edGenerateSlashGrate(candidate,h,material,cog)){jkGuiDialog_ErrorDialog(u"Slash Grate",u"Could not configure this adjoin. Convert editable splines first and check COG capacity.");continue;}
+            edCompactDecals(candidate);remember();if(commit()){say("Slash grate created on both sides with its damage COG. Ctrl+Z: undo.");break;}continue;
+        }
         if(choice==301){
             std::vector<std::array<char16_t,128>> names(count);
             for(int i=0;i<count;i++){snprintf(text,sizeof(text),"Surface %d (sector %d)",surfaceNumbers[i],selected.hits[i].cell);stdString_CharToWchar(names[i].data(),text,128);}

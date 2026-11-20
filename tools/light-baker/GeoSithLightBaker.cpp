@@ -158,7 +158,11 @@ static LRESULT CALLBACK confirmTestCleave(int code,WPARAM wp,LPARAM lp){
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  int argc;LPWSTR *argv=CommandLineToArgvW(GetCommandLineW(),&argc);if(argc<3)return 2;
  try{
- job=argv[2];level=std::make_unique<EdModel>();auto bytes=readBytes(job/"input.bin");if(bytes.empty()||!edWireDecode(level.get(),bytes.data(),(uint32_t)bytes.size())||!edValidate(level.get()))return 3;
+ job=argv[2];level=std::make_unique<EdModel>();auto bytes=readBytes(job/"input.bin");
+ if(bytes.empty()){error("Light Baker could not read the exported level.");return 3;}
+ if(!edWireDecode(level.get(),bytes.data(),(uint32_t)bytes.size())){error("Light Baker could not decode the exported level. Update GeoSithLightBaker.exe together with the game.");return 3;}
+ if(!edValidate(level.get())){error("Light Baker input failed geometry validation. Update GeoSithLightBaker.exe together with the game.");return 3;}
+ if(argc>3&&!wcscmp(argv[3],L"--validate"))return 0;
  std::ifstream names(job/"materials.txt");std::string line;while(std::getline(names,line))materials.emplace_back(line.begin(),line.end());colormap=std::filesystem::path(level->header.colormap).wstring();for(int s=0;s<level->count;s++)sectorColormaps.push_back(level->c[s].colormap[0]?std::filesystem::path(level->c[s].colormap).wstring():colormap);std::ifstream selection(job/"selected.txt");int s;while(selection>>s)if(valid(s))selected.push_back(s);
  {std::ifstream f(job.parent_path()/"baker-settings.txt");std::string value;while(std::getline(f,value))settings.push_back(value);if(settings.size()!=16)settings.clear();}
  newLightPosition=level->spawn;{std::ifstream f(job/"light-position.txt");EdVec p;if(f>>p.x>>p.y>>p.z)newLightPosition=p;}
@@ -166,6 +170,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  HMODULE plugin=LoadLibraryExW(argv[1],nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);if(!plugin){error("Could not load Light Baker.dll. Install its required x86 Visual C++ runtime.");return 4;}
  auto load=(bool (__stdcall *)(IJED*))GetProcAddress(plugin,"JEDPluginLoadStdCall");if(!load||!load(&host)){error("The DLL did not initialize its JED Light Baker interface.");return 5;}
  EnumWindows(findDialog,0);if(!dialog){error("The plugin did not open a window.");return 6;}installFeedback();SetForegroundWindow(dialog);
+ if(argc>3&&!wcscmp(argv[3],L"--test-open"))PostMessageW(dialog,WM_CLOSE,0,0);
  if(argc>3&&(!wcscmp(argv[3],L"--test")||!wcscmp(argv[3],L"--test-no-lights")||!wcscmp(argv[3],L"--test-sun")||!wcscmp(argv[3],L"--test-cleave"))){
      bool noLights=!wcscmp(argv[3],L"--test-no-lights"),sun=!wcscmp(argv[3],L"--test-sun");
      bool cleave=!wcscmp(argv[3],L"--test-cleave");

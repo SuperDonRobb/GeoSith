@@ -66,17 +66,20 @@ static void drawMaterialPaintBrush(int color){
         }
     }
 }
-static void drawMaterialDecal(const EdFace *surface,EdVec point){
-    if(tool!=2||materialDecalMode!=1||grabbing)return;rdMaterial *material=editorMaterial(currentMaterial);
-    if(!material||!rdMaterial_EnsureDataForced(material)||!material->num_texinfo||!material->texinfos[0])return;
-    rdTexinfo *info=material->texinfos[0];tVBuffer *buffer=info->texture_ptr?info->texture_ptr->texture_struct[0]:NULL;int width=buffer?buffer->format.width:1,height=buffer?buffer->format.height:1;
-    EdFace outline;if(!edDecalOutline(surface,point,materialDecalSize,(double)height/width,&outline))return;
+static void drawTextureOutline(const EdFace *surface,EdVec point,const EdFace &outline,rdMaterial *material,int width,int height){
     rdVector3 positions[ED_VERTS]={},normals[ED_VERTS]={};rdVector2 uv[ED_VERTS]={};flex_t lights[ED_VERTS]={},dynamic[ED_VERTS]={};int indices[ED_VERTS]={};
     rdFace face={};face.numVertices=outline.count;face.vertexPosIdx=face.vertexUVIdx=indices;face.material=material;face.wallCel=-1;face.geometryMode=RD_GEOMETRY_FULL;face.lightingMode=RD_LIGHTMODE_FULLYLIT;face.textureMode=RD_TEXTUREMODE_PERSPECTIVE;face.type=1|32;face.normal=rdvec(edNormal(surface));
     double radius=0;for(int i=0;i<outline.count;i++){EdVec p=edSub(outline.v[i].p,point);positions[i]=rdvec(p);normals[i]=face.normal;uv[i]={(flex_t)(outline.v[i].u*(std::min)(width,256)),(flex_t)(outline.v[i].v*(std::min)(height,256))};indices[i]=i;radius=fmax(radius,sqrt(edDot(p,p)));}
     rdMesh mesh={};mesh.geometryMode=RD_GEOMETRY_FULL;mesh.lightingMode=RD_LIGHTMODE_FULLYLIT;mesh.textureMode=RD_TEXTUREMODE_PERSPECTIVE;mesh.numVertices=mesh.numUVs=outline.count;mesh.numFaces=1;mesh.aVertices=positions;mesh.aTexVerticies=uv;mesh.vertexNormals=normals;mesh.vertices_i=lights;mesh.vertices_unk=dynamic;mesh.faces=&face;mesh.radius=radius;
     rdHierarchyNode node={};rdModel3 preview={};preview.numGeos=preview.numHNodes=1;preview.aGeos[0].numMeshes=1;preview.aGeos[0].aMeshes=&mesh;preview.aHierarchyNodes=&node;preview.radius=radius;
     rdThing thing={};rdThing_NewEntry(&thing,NULL);if(rdThing_SetModel3(&thing,&preview)){thing.desiredLightMode=thing.curLightMode=RD_LIGHTMODE_FULLYLIT;rdMatrix34 transform;rdMatrix_Identity34(&transform);transform.scale=rdvec(edAdd(point,edScale(edNormal(surface),.001)));rdCache_Flush();rdThing_Draw(&thing,&transform);rdCache_Flush();}rdThing_FreeEntry(&thing);
+}
+static void drawMaterialDecal(const EdFace *surface,EdVec point){
+    if(tool!=2||materialDecalMode!=1||grabbing)return;rdMaterial *material=editorMaterial(currentMaterial);
+    if(!material||!rdMaterial_EnsureDataForced(material)||!material->num_texinfo||!material->texinfos[0])return;
+    rdTexinfo *info=material->texinfos[0];tVBuffer *buffer=info->texture_ptr?info->texture_ptr->texture_struct[0]:NULL;int width=buffer?buffer->format.width:1,height=buffer?buffer->format.height:1;
+    EdFace outline;if(!edDecalOutline(surface,point,materialDecalSize,(double)height/width,&outline))return;
+    drawTextureOutline(surface,point,outline,material,width,height);
 }
 
 static int decalSelfTest(void){

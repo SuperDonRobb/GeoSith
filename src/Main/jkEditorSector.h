@@ -2,8 +2,8 @@
 static void mergeSelectedSectors(void){
     if(selectedSectorCount()<2){say("Shift+click at least two sectors, then press M to merge.");return;}
     if(netEditPending()){say("Wait for the current edit before merging sectors.");return;}
-    edCopyModel(candidate,model);int merged=-1;
-    if(!edMergeSectors(candidate,sectorPicks,&merged)){say("Merge cancelled: sectors must form one closed convex sector within the surface limits.");return;}
+    edCopyModel(candidate,model);int merged=-1;char reason[192];
+    if(!edMergeSectors(candidate,sectorPicks,&merged,reason,sizeof(reason))){say(reason);return;}
     remember();if(commit()){sectorPicks.clear();sectorPicks[merged]=1;picks.count=0;hover.cell=-1;say("Sectors merged. Lowest sector's attributes retained; internal surface references cleared. Ctrl+Z: undo.");}
 }
 static void captureSectorFlags(jkGuiMenu *menu){static int frame;if(++frame%3)return;surfaceFlagClick(&menu->paElements[1],menu,0,0,1);menu->lastClicked=1;}
@@ -86,8 +86,12 @@ static void sectorSoundDialog(std::vector<EdCell>& draft){
     for(auto &cell:draft)snprintf(cell.sound,sizeof(cell.sound),"%s",name);
 }
 static int sectorGenerateMenu(void){
-    char16_t entries[3][128];stdString_SafeWStrCopy(entries[0],u"Destructible",128);stdString_SafeWStrCopy(entries[1],u"Lift_Bottom",128);stdString_SafeWStrCopy(entries[2],u"Lift_Top",128);
-    return chooseList(u"Generate",entries,3,0);
+    char16_t entries[11][128];stdString_SafeWStrCopy(entries[0],u"Destructible",128);stdString_SafeWStrCopy(entries[1],u"Lift_Bottom",128);stdString_SafeWStrCopy(entries[2],u"Lift_Top",128);stdString_SafeWStrCopy(entries[3],u"Water",128);stdString_SafeWStrCopy(entries[4],u"Flowing Water SIM",128);
+    stdString_SafeWStrCopy(entries[5],u"Door",128);
+    stdString_SafeWStrCopy(entries[6],u"Wind Tunnel",128);
+    stdString_SafeWStrCopy(entries[7],u"Lava",128);stdString_SafeWStrCopy(entries[8],u"Acid",128);stdString_SafeWStrCopy(entries[9],u"Electricity",128);
+    stdString_SafeWStrCopy(entries[10],u"Spiral Staircase",128);
+    return chooseList(u"Generate",entries,11,0);
 }
 static void sectorAttributesDialog(void){
     std::vector<int> selected;std::vector<EdCell> draft;
@@ -123,6 +127,7 @@ static void sectorAttributesDialog(void){
         jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&elements[17]);jkGuiRend_MenuSetReturnKeyShortcutElement(&menu,&elements[16]);
         if((getenv("GEOSITH_SECTOR_TEST")||getenv("GEOSITH_SPLINE_FLAGS_TEST"))&&getenv("GEOSITH_STRESS"))menu.idkFunc=captureSectorAttributes;
         if(getenv("GEOSITH_DESTRUCTIBLE_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=generateMenuTest;
+        if(getenv("GEOSITH_WIND_TEST")&&getenv("GEOSITH_STRESS"))menu.idkFunc=windMenuTest;
         int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(elements);if(choice<0)break;
         std::vector<EdCell> edited=draft;int valid=1;
         for(int f=0;f<6;f++)if(f!=0&&f!=2&&memcmp(before[f],values[f],sizeof(values[f]))){stdString_WcharToChar(text,values[f],sizeof(text));for(auto &cell:edited)valid=valid&&sectorFieldSet(cell,f,text);}
@@ -135,6 +140,26 @@ static void sectorAttributesDialog(void){
         else if(choice==205){
             if(!edModelsEqual(&original,model)||netEditPending()){say("Level changed or an edit is pending. Reopen sector attributes.");break;}
             int generate=sectorGenerateMenu();if(generate<0)continue;
+            if(generate>=7&&generate<=9){
+                int material=-1;const char *name=generate==7?"00fyfl01.mat":"00tfuel.mat";
+                if(generate!=9){for(int i=0;i<paletteCount;i++)if(!__strcmpi(paletteNames[i],name)){material=i;break;}
+                    if(material<0||!editorMaterial(material)){jkGuiDialog_ErrorDialog(u"Hazard",generate==7?u"Could not load 00fyfl01.mat.":u"Could not load 00tfuel.mat.");continue;}}
+                if(generate==9&&(!sithTemplate_GetTemplate("ghost")||!sithTemplate_GetTemplate("+force_lightning"))){jkGuiDialog_ErrorDialog(u"Electricity",u"The ghost and Force Lightning templates are required.");continue;}
+                edCopyModel(candidate,model);for(size_t i=0;i<selected.size();i++)candidate->c[selected[i]]=draft[i];
+                if(!edGenerateHazard(candidate,sectorPicks,material,generate-7)){jkGuiDialog_ErrorDialog(u"Hazard",u"Could not create the hazard. Convert editable splines first and check geometry / COG capacity.");continue;}
+                remember();if(commit()){say("Hazard created. Damage / interval are editable in Placed COGs. Ctrl+Z: undo.");break;}continue;
+            }
+            if(generate==10){if(selected.size()!=1){jkGuiDialog_ErrorDialog(u"Spiral Staircase",u"Select one six-sided sector.");continue;}if(spiralOptions(selected[0],draft[0]))break;continue;}
+            if(generate==6){if(selected.size()!=1){jkGuiDialog_ErrorDialog(u"Wind Tunnel",u"Select one sector for the wind gizmo.");continue;}if(windStart(selected[0],draft[0]))break;continue;}
+            if(generate==5){if(selected.size()!=1){jkGuiDialog_ErrorDialog(u"Door",u"Select one sector to turn into a door.");continue;}if(doorStart(selected[0],draft[0]))break;continue;}
+            if(generate==4){if(selected.size()!=1){jkGuiDialog_ErrorDialog(u"Flowing Water SIM",u"Select one sector as the water source.");continue;}if(waterSimStart(selected[0]))break;continue;}
+            if(generate==3){
+                int material=-1;for(int i=0;i<paletteCount;i++)if(!__strcmpi(paletteNames[i],"oasis_water.mat")){material=i;break;}
+                if(material<0||!editorMaterial(material)||!sithSound_Load("00underwater.wav",0)){jkGuiDialog_ErrorDialog(u"Water",u"Could not load oasis_water.mat or 00underwater.wav from the game resources.");continue;}
+                edCopyModel(candidate,model);for(size_t i=0;i<selected.size();i++)candidate->c[selected[i]]=draft[i];
+                if(!edGenerateWater(candidate,sectorPicks,material)){jkGuiDialog_ErrorDialog(u"Water",u"Could not configure water sectors. Convert editable splines first and check the selected geometry.");continue;}
+                remember();if(commit()){say("Water sectors created with ambient sound and translucent boundary surfaces. Ctrl+Z: undo.");break;}continue;
+            }
             if(generate==1||generate==2){
                 if(selected.size()!=1){jkGuiDialog_ErrorDialog(u"Lift",u"Select one sector to turn into a lift.");continue;}
                 if(!sithTemplate_GetTemplate("_walkstruct")){jkGuiDialog_ErrorDialog(u"Lift",u"The _walkstruct base template is unavailable.");continue;}

@@ -1,11 +1,14 @@
 #include <stddef.h>
 #include "edGeometry.h"
 #include "edWire.h"
+#include "edWaterSim.h"
+#include "edWaterThrustScript.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <string>
+#include <algorithm>
 void edCopyModel(EdModel *out,const EdModel *source){
  if(out==source)return;EdModel copy=*source;
  copy.c.resize(copy.count);for(int s=0;s<copy.count;s++)copy.c[s].f.resize(copy.c[s].count);
@@ -487,7 +490,7 @@ static int rayFaces(const EdModel *m,EdVec o,EdVec d,EdHit *h,int includeAdjoins
     h->cell=h->face=h->vertex=h->edge=-1; h->distance=1000;
     for(int s=0;s<m->count;s++) for(int i=0;i<m->c[s].count;i++) {
         const EdFace *f=&m->c[s].f[i];
-        if(f->neighbor>=0&&(!includeAdjoins||(includeAdjoins==2&&edSurfaceAttributes(f).geometryMode==0))) continue;
+        if(f->neighbor>=0&&(!includeAdjoins||includeAdjoins==4||(includeAdjoins==2&&edSurfaceAttributes(f).geometryMode==0))) continue;
         EdVec n=edNormal(f); double den=edDot(n,d); if(den>=-ED_EPS) continue;
         double t=edDot(n,edSub(f->v[0].p,o))/den; if(t<0||t>=h->distance) continue;
         EdVec p=edAdd(o,edScale(d,t)); int inside=1;
@@ -495,6 +498,7 @@ static int rayFaces(const EdModel *m,EdVec o,EdVec d,EdHit *h,int includeAdjoins
         if(inside) { h->cell=s; h->face=i; h->distance=t; h->point=p; }
     }
     if(h->cell<0) return 0;
+    if(includeAdjoins>=3)return 1; // Exact intersected face; do not retarget nearby corners.
     /* Materials target the intersected face, including its corners and edges. */
     if(includeAdjoins==2){const EdFace *face=&m->c[h->cell].f[h->face];double best=fmin(.04,h->distance*.018);
         for(int j=0;j<face->count;j++){EdVec a=face->v[j].p,e=edSub(face->v[(j+1)%face->count].p,a);double den=edDot(e,e);if(den<ED_EPS*ED_EPS)continue;
@@ -515,6 +519,7 @@ static int rayFaces(const EdModel *m,EdVec o,EdVec d,EdHit *h,int includeAdjoins
 }
 int edRay(const EdModel *m,EdVec o,EdVec d,EdHit *h) {return rayFaces(m,o,d,h,0);}
 int edRaySelection(const EdModel *m,EdVec o,EdVec d,EdHit *h) {return rayFaces(m,o,d,h,1);}
+int edRaySurface(const EdModel *m,EdVec o,EdVec d,EdHit *h,int adjoins) {return rayFaces(m,o,d,h,adjoins?3:4);}
 int edRayMaterial(const EdModel *m,EdVec o,EdVec d,EdHit *h) {return rayFaces(m,o,d,h,2);}
 struct EdLightCell {EdVec lo,hi;std::vector<EdVec> normals;};
 static int lightRayBounds(EdVec o,EdVec d,EdVec lo,EdVec hi,double limit){
@@ -892,7 +897,7 @@ static int dissolveFaces(const EdCell *cell,const EdBuffer<unsigned char>& group
     if(!capHull(face,points,count,edNormal(&cell->f[seed]))||face->count<3)return 0;
     return fabs(dissolveArea(face)-area)<=ED_EPS*fmax(1,area);
 }
-int edDeleteHandle(EdModel *m,EdHit hit){
+static int deleteHandlePlanar(EdModel *m,EdHit hit){
     if(hit.cell>=0&&hit.cell<m->count&&m->c[hit.cell].splineId)return 0;
     if(!edValidate(m))return 0;
     for(int s=0;s<m->count;s++)for(int f=0;f<m->c[s].count;f++){
@@ -954,6 +959,47 @@ int edDeleteHandle(EdModel *m,EdHit hit){
     }
     if(ok)ok=edValidate(out);
     if(ok)edCopyModel(m,out);edFree(out);return ok;
+}
+int edDeleteHandle(EdModel *m,EdHit hit){
+    if(deleteHandlePlanar(m,hit))return 1;
+    if(hit.vertex>=0||hit.cell<0||hit.cell>=m->count||hit.face<0||hit.face>=m->c[hit.cell].count||m->c[hit.cell].splineId||!edValidate(m))return 0;
+    const EdCell &cell=m->c[hit.cell];const EdFace &face=cell.f[hit.face];
+    if(hit.edge<0||hit.edge>=face.count)return 0;
+    EdVec a=face.v[hit.edge].p,b=face.v[(hit.edge+1)%face.count].p;
+    std::vector<EdVec> points;int patches=0;bool nonplanar=false;
+    for(int f=0;f<cell.count;f++)if(cell.f[f].neighbor==face.neighbor&&dissolveSharedEdge(&cell.f[f],a,b)){
+        patches++;for(int v=0;v<cell.f[f].count;v++){
+            EdVec p=cell.f[f].v[v].p;if(fabs(edDot(edNormal(&face),edSub(p,face.v[0].p)))>ED_EPS)nonplanar=true;
+            bool exists=false;for(EdVec q:points)if(same(p,q)){exists=true;break;}if(!exists)points.push_back(p);
+        }
+    }
+    // A failed planar dissolve (a notch, boundary or vertex limit) must not
+    // trigger arbitrary reshaping. Only a genuinely nonplanar edge qualifies.
+    if(patches<2||!nonplanar)return 0;
+    struct Plane {EdVec normal,origin;int moved;double cost;};std::vector<Plane> planes;
+    for(size_t i=0;i<points.size();i++)for(size_t j=i+1;j<points.size();j++)for(size_t k=j+1;k<points.size();k++){
+        EdVec n=edCross(edSub(points[j],points[i]),edSub(points[k],points[i]));if(length(n)<ED_EPS*ED_EPS)continue;n=unit(n);
+        bool duplicate=false;for(const Plane &p:planes)if(fabs(edDot(n,p.normal))>1-1e-10&&fabs(edDot(n,edSub(points[i],p.origin)))<ED_EPS){duplicate=true;break;}if(duplicate)continue;
+        Plane p={n,points[i],0,0};for(EdVec q:points){double d=edDot(n,edSub(q,p.origin));if(fabs(d)>ED_EPS){p.moved++;p.cost+=d*d;}}if(p.moved)planes.push_back(p);
+    }
+    // Prefer keeping the largest set of existing vertices exactly fixed, then
+    // the smallest total displacement. Stable ordering resolves symmetric ties.
+    std::stable_sort(planes.begin(),planes.end(),[](const Plane &a,const Plane &b){return a.moved!=b.moved?a.moved<b.moved:a.cost<b.cost;});
+    for(const Plane &plane:planes){
+        EdModel draft;edCopyModel(&draft,m);bool allowed=true;
+        for(int s=0;s<m->count&&allowed;s++)for(int f=0;f<m->c[s].count&&allowed;f++){
+            bool changed=false;for(int v=0;v<m->c[s].f[f].count;v++)for(EdVec p:points){
+                double d=edDot(plane.normal,edSub(p,plane.origin));if(fabs(d)<=ED_EPS||!same(m->c[s].f[f].v[v].p,p))continue;
+                if(m->c[s].splineId){allowed=false;break;}
+                draft.c[s].f[f].v[v].p=edSub(p,edScale(plane.normal,d));changed=true;break;
+            }
+            if(changed)edMapFace(&draft.c[s].f[f]);
+        }
+        // Move every shared occurrence, including reciprocal adjoins. Never
+        // triangulate damaged neighbors or fill holes to force the dissolve.
+        if(allowed&&edValidate(&draft)&&deleteHandlePlanar(&draft,hit)&&edResolve(&draft)&&edValidate(&draft)){edCopyModel(m,&draft);return 1;}
+    }
+    return 0;
 }
 /* Cleanup preserves texture mapping, flags and rendering settings as well as
    the material. A portal can only merge if its reciprocal patches can too. */
@@ -1076,10 +1122,26 @@ int edCleanupSector(EdModel *m,int sector){
 }
 /* A merge removes only internal adjoins. Validation of the retained boundary
    rejects disconnected, concave, open or oversized results without a hull fill. */
-int edMergeSectors(EdModel *m,const EdBuffer<unsigned char>& selected,int *merged){
+int edMergeSectors(EdModel *m,const EdBuffer<unsigned char>& selected,int *merged,char *reason,size_t reasonSize){
+    if(reason&&reasonSize)snprintf(reason,reasonSize,"Merge cancelled: sectors must form one closed convex sector within the surface limits.");
     for(int s=0;s<m->count;s++)if(selected[s]&&m->c[s].splineId)return 0;
     int first=-1,count=0;for(int s=0;s<m->count;s++)if(selected[s]){if(first<0)first=s;count++;}
     if(count<2||!edValidate(m))return 0;
+    // Explain even a microscopic inward bend without silently filling it in or
+    // changing adjoining sectors. Report the original level's surface number.
+    int surface=0;double tolerance=fmax(ED_EPS,m->c[first].tolerance);
+    for(int s=0;s<m->count;s++)for(int f=0;f<m->c[s].count;f++,surface++)if(selected[s]){
+        const EdFace &face=m->c[s].f[f];
+        if(face.neighbor>=0&&face.neighbor<m->count&&selected[face.neighbor])continue;
+        EdVec normal=edNormal(&face);
+        for(int t=0;t<m->count;t++)if(selected[t]&&t!=s)for(int g=0;g<m->c[t].count;g++)for(int v=0;v<m->c[t].f[g].count;v++){
+            double distance=edDot(normal,edSub(m->c[t].f[g].v[v].p,face.v[0].p));
+            if(distance < -tolerance){
+                if(reason&&reasonSize)snprintf(reason,reasonSize,"Merge cancelled: non-convex at sector %d, surface %d. Sector %d extends %.7g units past its plane. Align these walls first.",s,surface,t,-distance);
+                return 0;
+            }
+        }
+    }
     EdModel out;edCopyModel(&out,m);out.c.clear();out.count=0;
     EdBuffer<int> cells;EdBuffer<EdBuffer<int>> faces;
     for(int s=0;s<m->count;s++)if(!selected[s]||s==first){cells[s]=out.count;out.c[out.count++]=m->c[s];}
@@ -1104,7 +1166,7 @@ int edMergeSectors(EdModel *m,const EdBuffer<unsigned char>& selected,int *merge
     if(!edValidate(&out))return 0;
     edCleanupSector(&out,target);
     if(!edValidate(&out))return 0;
-    edCopyModel(m,&out);if(merged)*merged=target;return 1;
+    edCopyModel(m,&out);if(merged)*merged=target;if(reason&&reasonSize)reason[0]=0;return 1;
 }
 int edDeleteSector(EdModel *m,int sector) {
     if(m->count<=1||sector<0||sector>=m->count)return 0;
@@ -1291,6 +1353,122 @@ static int pointOnSurface(const EdFace *face,EdVec point) {
         if(edDot(edCross(edge,edSub(point,a)),n)<-ED_EPS*length(edge))return 0;
     }return 1;
 }
+// Isolate the convex beam joining two complete end faces. Supporting hull
+// planes never pass through either end face, including wall-to-floor beams
+// whose side quads need two planar facets. Preserve all surrounding air.
+static int cleaveFaceBeam(EdModel *m,EdHit a,EdHit b){
+    if(a.cell!=b.cell||a.face==b.face||m->c[a.cell].splineId)return 0;
+    const EdCell &source=m->c[a.cell];std::vector<EdVec> points;
+    for(int f:{a.face,b.face})for(int v=0;v<source.f[f].count;v++){
+        EdVec p=source.f[f].v[v].p;bool duplicate=false;for(EdVec q:points)if(same(p,q)){duplicate=true;break;}if(!duplicate)points.push_back(p);
+    }
+    struct Plane{EdVec n;double d;};std::vector<Plane> planes;
+    for(size_t i=0;i<points.size();i++)for(size_t j=i+1;j<points.size();j++)for(size_t k=j+1;k<points.size();k++){
+        EdVec n=edCross(edSub(points[j],points[i]),edSub(points[k],points[i]));if(length(n)<ED_EPS)continue;n=unit(n);double d=edDot(n,points[i]);
+        double lo=1e30,hi=-1e30;for(EdVec p:points){double side=edDot(n,p)-d;lo=fmin(lo,side);hi=fmax(hi,side);}
+        if(lo<-ED_EPS&&hi>ED_EPS)continue;if(hi-lo<ED_EPS)continue;
+        if(hi<=ED_EPS){n=edScale(n,-1);d=-d;}
+        bool duplicate=false;for(const auto &plane:planes)if(edDot(n,plane.n)>.999999&&fabs(d-plane.d)<ED_EPS){duplicate=true;break;}
+        if(!duplicate)planes.push_back({n,d});
+    }
+    if(planes.size()<4)return 0;
+    // Bound the detailed cuts with an oriented rectangular prism first.
+    // Its long axis joins the end-face centers, rather than using world axes.
+    EdVec centers[2]={};int endFaces[2]={a.face,b.face};
+    for(int end=0;end<2;end++){const EdFace &face=source.f[endFaces[end]];for(int v=0;v<face.count;v++)centers[end]=edAdd(centers[end],edScale(face.v[v].p,1.0/face.count));}
+    EdVec axis=edSub(centers[1],centers[0]);if(length(axis)<ED_EPS)return 0;axis=unit(axis);
+    EdVec reference=fabs(axis.z)<.9?edV(0,0,1):edV(0,1,0);
+    EdVec across=unit(edCross(reference,axis)),up=unit(edCross(axis,across));
+    std::vector<Plane> enclosure;
+    for(EdVec direction:{across,up,axis}){
+        double low=1e30,high=-1e30;for(EdVec p:points){double d=edDot(direction,p);low=fmin(low,d);high=fmax(high,d);}
+        if(high-low<=ED_EPS)return 0;
+        enclosure.push_back({direction,low});enclosure.push_back({edScale(direction,-1),-high});
+    }
+    EdModel draft=*m;EdCell core=source;std::vector<EdCell> surrounding;
+    for(const auto &plane:enclosure){EdCell inside,outside;
+        if(!cellclip(&core,plane.n,plane.d,&inside)||!inside.count||!cellclip(&core,edScale(plane.n,-1),-plane.d,&outside))return 0;
+        if(outside.count)surrounding.push_back(outside);core=std::move(inside);
+    }
+    // Only the retained box/room intersection receives the hull cuts. Outside
+    // fragments never see the beam's numerous slanted side planes.
+    for(const auto &plane:planes){EdCell inside,outside;
+        if(!cellclip(&core,plane.n,plane.d,&inside)||!inside.count||!cellclip(&core,edScale(plane.n,-1),-plane.d,&outside))return 0;
+        if(outside.count)surrounding.push_back(outside);core=std::move(inside);
+    }
+    if(surrounding.empty()||volume(&core)<=ED_EPS*ED_EPS*ED_EPS)return 0;
+    draft.c[a.cell]=core;for(const auto &cell:surrounding)draft.c[draft.count++]=cell;
+    if(!edResolve(&draft)||!edValidate(&draft))return 0;
+    for(int i=0;i<draft.cogCount;i++)for(int j=0;j<draft.cogs[i].count;j++){const EdCogParam &p=m->cogs[i].params[j];if(p.type==ED_COG_SURFACE&&p.cell>=0&&p.cell<m->count&&p.face>=0&&p.face<m->c[p.cell].count)remapCogSurface(&draft.cogs[i].params[j],&m->c[p.cell].f[p.face],&draft);}
+    edMapWorld(&draft);*m=std::move(draft);return 3;
+}
+int edCleaveSelection(EdModel *m,const EdSelection *selection){
+    if(!selection||selection->count!=2)return 0;
+    EdHit h[2]={selection->hits[0],selection->hits[1]};
+    if(!validHit(m,h[0])||!validHit(m,h[1]))return 0;
+    if(h[0].vertex<0&&h[1].vertex<0&&h[0].edge<0&&h[1].edge<0)return cleaveFaceBeam(m,h[0],h[1]);
+    bool vertices=h[0].vertex>=0&&h[1].vertex>=0;
+    if(!vertices&&(h[0].vertex>=0||h[1].vertex>=0||h[0].edge<0||h[1].edge<0))return 0;
+    EdVec a[2],b[2];for(int i=0;i<2;i++){
+        const EdFace &f=m->c[h[i].cell].f[h[i].face];int v=vertices?h[i].vertex:h[i].edge;
+        a[i]=f.v[v].p;b[i]=f.v[(v+1)%f.count].p;
+        if(m->c[h[i].cell].splineId)return 0;
+    }
+    EdVec plane={};bool edgePlane=false;if(!vertices){
+        EdVec edge=edSub(b[0],a[0]);plane=edCross(edge,edSub(a[1],a[0]));
+        if(length(plane)<ED_EPS)plane=edCross(edge,edSub(b[1],a[0]));
+        if(length(plane)>=ED_EPS){plane=unit(plane);
+            edgePlane=fabs(edDot(plane,edSub(b[1],a[0])))<=ED_EPS&&fabs(edDot(plane,edSub(a[1],a[0])))<=ED_EPS;
+        }
+    }else if(same(a[0],a[1]))return 0;
+    // Picked handles may belong to different faces at a shared corner. Locate
+    // the common face/sector geometrically, using the exact unsnapped vertices.
+    for(int owner=0;owner<2;owner++){
+        int s=h[owner].cell;if(owner&&s==h[0].cell)continue;const EdCell &cell=m->c[s];
+        if(vertices){
+            for(int f=0;f<cell.count;f++){
+                bool found[2]={false,false};for(int v=0;v<cell.f[f].count;v++)for(int i=0;i<2;i++)if(same(cell.f[f].v[v].p,a[i]))found[i]=true;
+                if(!found[0]||!found[1])continue;EdModel draft;edCopyModel(&draft,m);
+                if(edCleaveFacePlane(&draft,s,f,edCross(edNormal(&cell.f[f]),edSub(a[1],a[0])),a[0])&&edValidate(&draft)){edCopyModel(m,&draft);return 1;}
+            }
+        }else{
+            bool found[2]={false,false};for(int f=0;f<cell.count;f++)for(int i=0;i<2;i++)
+                if(dissolveSharedEdge(&cell.f[f],a[i],b[i])&&pointOnSurface(&cell.f[f],a[i])&&pointOnSurface(&cell.f[f],b[i]))found[i]=true;
+            if(!found[0]||!found[1])continue;EdModel draft;edCopyModel(&draft,m);EdBuffer<unsigned char> selected;selected[s]=1;
+            if(edgePlane&&edCleaveSectorsPlane(&draft,selected,plane,a[0])&&edValidate(&draft)){edCopyModel(m,&draft);return 2;}
+            // A warped connection needs two planar triangles, not a plane
+            // through the edge midpoints (which cuts the selected faces).
+            const EdFace &face0=m->c[h[0].cell].f[h[0].face],&face1=m->c[h[1].cell].f[h[1].face];
+            EdVec centers[2]={};for(int v=0;v<face0.count;v++)centers[0]=edAdd(centers[0],edScale(face0.v[v].p,1.0/face0.count));
+            for(int v=0;v<face1.count;v++)centers[1]=edAdd(centers[1],edScale(face1.v[v].p,1.0/face1.count));
+            for(int diagonal=0;diagonal<4;diagonal++){
+                EdVec p=(diagonal&1)?b[1]:a[1],q=(diagonal&1)?a[1]:b[1],shared=(diagonal&2)?a[0]:b[0];
+                EdVec normals[2]={edCross(edSub(b[0],a[0]),edSub(p,a[0])),edCross(edSub(q,p),edSub(shared,p))};
+                EdVec anchors[2]={a[0],p};bool safe=true;
+                for(int k=0;k<2&&safe;k++){
+                    if(length(normals[k])<ED_EPS){safe=false;break;}normals[k]=unit(normals[k]);
+                    double lo=1e30,hi=-1e30;
+                    for(const EdFace *face:{&face0,&face1})for(int v=0;v<face->count;v++){
+                        double d=edDot(normals[k],edSub(face->v[v].p,anchors[k]));lo=fmin(lo,d);hi=fmax(hi,d);
+                    }
+                    if(lo<-ED_EPS&&hi>ED_EPS)safe=false;
+                }
+                if(!safe)continue;edCopyModel(&draft,m);
+                for(int k=0;k<2&&safe;k++){
+                    int target=-1;
+                    for(int c=0;c<draft.count;c++)if(edContains(&draft.c[c],centers[0])&&edContains(&draft.c[c],centers[1])){
+                        bool endpoints=true;for(int e=0;e<2;e++)endpoints&=edContains(&draft.c[c],a[e])&&edContains(&draft.c[c],b[e]);
+                        if(endpoints){target=c;break;}
+                    }
+                    if(target<0){safe=false;break;}EdBuffer<unsigned char> cut;cut[target]=1;
+                    if(!edCleaveSectorsPlane(&draft,cut,normals[k],anchors[k]))safe=false;
+                }
+                if(safe&&edValidate(&draft)){edCopyModel(m,&draft);return 2;}
+            }
+        }
+    }
+    return 0;
+}
 EdVec edSelectionDeltaXYGrid(const EdModel *original,const EdSelection *selection,EdVec delta,double grid) {
     if(!isfinite(grid)||grid<ED_GRID)grid=ED_GRID;
     delta.z=0;
@@ -1458,6 +1636,9 @@ void edSelectionRemap(const EdModel *from,const EdModel *to,const EdSelection *s
 unsigned int edCellHash(const EdCell *c){EdWire measure={NULL,ED_NET_LIMIT/2,0,0,1};edWireCell(&measure,(EdCell*)c);if(!measure.ok)return 0;std::vector<unsigned char> bytes(measure.at);EdWire w={bytes.data(),bytes.size(),0,0,1};edWireCell(&w,(EdCell*)c);unsigned int hash=w.ok?edNetHash(bytes.data(),(uint32_t)bytes.size()):0;for(int f=0;f<c->count;f++){if(c->f[f].decalId)hash=(hash^(unsigned int)c->f[f].decalId)*16777619u;if(c->f[f].bakedLight)for(int v=0;v<c->f[f].count;v++){hash=(hash^edNetHash((const unsigned char*)&c->f[f].v[v].lightRGB,sizeof(EdVec)))*16777619u;hash=(hash^edNetHash((const unsigned char*)&c->f[f].v[v].light,sizeof(double)))*16777619u;}}return hash;}
 
 #include "edGroups.h"
+#include "edBevel.h"
+#include "edSpiralStairs.h"
+#include "edWind.h"
 #include "edSpline.h"
 
 #include "edTerrain.h"
@@ -1467,3 +1648,295 @@ unsigned int edCellHash(const EdCell *c){EdWire measure={NULL,ED_NET_LIMIT/2,0,0
 #include "edDecal.h"
 
 #include "edDestructible.h"
+#include "edDoor.h"
+#include "edConveyor.h"
+#include "edTeleporterScript.h"
+int edGenerateTeleporter(EdModel *m,int entrance,int destination,int twoWay){
+    if(entrance<0||destination<0||entrance>=m->objectCount||destination>=m->objectCount||entrance==destination||m->cogCount>=ED_COGS)return 0;
+    EdVec delta=edSub(m->objects[entrance].position,m->objects[destination].position);if(edDot(delta,delta)<.25)return 0;
+    for(int id:{entrance,destination}){int inside=0;for(int c=0;c<m->count;c++)inside|=edContains(&m->c[c],m->objects[id].position);if(!inside)return 0;}
+    // Do not create competing pulse scripts for an already assigned endpoint.
+    for(int c=0;c<m->cogCount;c++)if(!strcmp(m->cogs[c].file,"gs_teleport.cog"))for(int p=0;p<m->cogs[c].count;p++){
+        const auto &v=m->cogs[c].params[p];if(v.type==ED_COG_THING&&(atoi(v.value)==m->spawnCount+entrance||atoi(v.value)==m->spawnCount+destination))return 0;
+    }
+    EdPlacedCog cog={};if(!edCogParseScript(&cog,"gs_teleport.cog",edTeleporterScript))return 0;
+    for(int p=0;p<cog.count;p++){
+        auto &v=cog.params[p];if(!strcmp(v.name,"entrance"))snprintf(v.value,32,"%d",m->spawnCount+entrance);
+        else if(!strcmp(v.name,"destination"))snprintf(v.value,32,"%d",m->spawnCount+destination);
+        else if(!strcmp(v.name,"twoway"))snprintf(v.value,32,"%d",twoWay?1:0);
+    }
+    EdModel work=*m;work.cogs[work.cogCount++]=cog;if(!edValidate(&work))return 0;*m=std::move(work);return 1;
+}
+
+int edBakeWaterSim(EdModel *model,const EdWaterSim &sim,int material,const EdPlacedCog &conveyor,std::string &error,double standingHeight){
+    if(!sim.geometry){error="No water simulation geometry.";return 0;}
+    auto storage=std::make_unique<EdModel>(*model);auto &work=*storage;
+    EdBuffer<unsigned char> wet;std::vector<EdVec> currents(model->count);
+    struct Sample {EdVec point;double weight;};
+    struct Fit {std::vector<Sample> samples;double volume=0,capacity=0,pooled=0,weight=0;EdVec flow={},origin={},plane={};bool partial=false,basin=false;};
+    std::vector<Fit> fits(model->count);
+    for(const auto &pool:sim.pools){
+        int sector=pool.sector;
+        if(sector<0||sector>=model->count||model->c[sector].splineId){error="Simulation sector changed or is an editable spline.";return 0;}
+        auto &fit=fits[sector];fit.capacity+=pool.capacity;fit.volume+=pool.volume;fit.pooled+=pool.pooledVolume;fit.weight+=pool.area;
+        fit.flow=edAdd(fit.flow,edScale(pool.flow,pool.volume));
+        if(pool.pooledVolume<=pool.capacity*1e-6)continue;
+        fit.samples.push_back({edV(pool.center.x,pool.center.y,pool.pooledLevel),pool.area});
+    }
+    bool any=false;
+    for(int sector=0;sector<model->count;sector++){
+        auto &fit=fits[sector];if(fit.capacity<=0||fit.volume<=fit.capacity*1e-6)continue;
+        EdVec flow=edScale(fit.flow,1/fit.volume);
+        if(fit.capacity-fit.volume<=fit.capacity*1e-5){wet[sector]=1;currents[sector]=flow;any=true;continue;}
+        if(fit.samples.empty())continue;
+        EdVec mean={};double weight=0;
+        for(auto sample:fit.samples){mean=edAdd(mean,edScale(sample.point,sample.weight));weight+=sample.weight;}
+        mean=edScale(mean,1/weight);
+        double xx=0,xy=0,yy=0,xz=0,yz=0;
+        for(auto sample:fit.samples){EdVec d=edSub(sample.point,mean);double w=sample.weight;xx+=w*d.x*d.x;xy+=w*d.x*d.y;yy+=w*d.y*d.y;xz+=w*d.x*d.z;yz+=w*d.y*d.z;}
+        // Pseudoinverse supports narrow channels with just one row of samples:
+        // fit along the channel and leave the unmeasured cross-slope flat.
+        double angle=.5*atan2(2*xy,xx-yy),cs=cos(angle),sn=sin(angle),sx=0,sy=0;
+        for(int axis=0;axis<2;axis++){
+            double x=axis?-sn:cs,y=axis?cs:sn;
+            double variance=xx*x*x+2*xy*x*y+yy*y*y;
+            if(variance>fmax(1e-16,(xx+yy)*1e-10)){double slope=(x*xz+y*yz)/variance;sx+=slope*x;sy+=slope*y;}
+        }
+        double floorMin=1e30,floorMax=-1e30,ceiling=-1e30;
+        for(auto &p:sim.pools)if(p.sector==sector){floorMin=fmin(floorMin,p.bottom);floorMax=fmax(floorMax,p.bottom);ceiling=fmax(ceiling,p.top);}
+        // Flat-bottomed basins get a horizontal, volume-preserving pool. A
+        // localized inlet or falling stream must not tilt the whole reservoir.
+        fit.basin=floorMax-floorMin<=sim.spacing*.25;
+        if(fit.basin){double lo=floorMin,hi=ceiling;
+            for(int iteration=0;iteration<60;iteration++){double z=(lo+hi)*.5,volume=0;
+                for(auto &p:sim.pools)if(p.sector==sector)volume+=std::clamp(z-p.bottom,0.0,p.top-p.bottom)*p.area;
+                if(volume<fit.pooled)lo=z;else hi=z;
+            }
+            mean.z=(lo+hi)*.5;sx=sy=0;
+        }
+        fit.origin=edV(mean.x,mean.y,0);fit.plane=edV(sx,sy,mean.z);fit.partial=true;
+    }
+    // Thin streams must stay above their solid support, including the ends
+    // beyond the voxel centers. Otherwise a least-squares plane can cut into
+    // the ramp before reaching its neighboring sector.
+    std::vector<std::vector<EdVec>> supports(model->count);
+    for(int c=0;c<model->count;c++)if(fits[c].partial&&!fits[c].basin){
+        EdVec floorNormal={};double floorDistance=0;bool multipleFloors=false;
+        for(int f=0;f<model->c[c].count;f++){const auto &face=model->c[c].f[f];EdVec normal=edNormal(&face);
+            if(face.neighbor>=0||normal.z<=1e-6)continue;
+            double distance=edDot(normal,face.v[0].p);
+            if(supports[c].empty()){floorNormal=normal;floorDistance=distance;}
+            else if(edDot(floorNormal,normal)<1-1e-8||fabs(distance-floorDistance)>ED_EPS)multipleFloors=true;
+            for(int v=0;v<face.count;v++)supports[c].push_back(face.v[v].p);
+        }
+        // A V-shaped channel has banks above the stream, not a single ramp.
+        // Do not raise its water to cover those dry banks.
+        if(multipleFloors)supports[c].clear();
+    }
+    auto keepAboveFloor=[&](int c){auto &fit=fits[c];double raise=0;
+        for(auto p:supports[c])raise=fmax(raise,p.z+ED_EPS*4-(fit.plane.x*(p.x-fit.origin.x)+fit.plane.y*(p.y-fit.origin.y)+fit.plane.z));
+        fit.plane.z+=raise;return raise;
+    };
+    for(int c=0;c<model->count;c++)keepAboveFloor(c);
+    // Match the water intersection LINE on a portal, not heights at all its
+    // vertices. On an inclined portal the latter forces both water planes to
+    // be identical, flattening a channel into the reservoir (or below its floor).
+    struct Seam {int a,b,face;};std::vector<Seam> seams;
+    auto heightAt=[](const Fit &fit,EdVec p){return fit.plane.x*(p.x-fit.origin.x)+fit.plane.y*(p.y-fit.origin.y)+fit.plane.z;};
+    auto seamPoints=[&](const Seam &seam){
+        const auto &face=model->c[seam.a].f[seam.face];std::vector<EdVec> points;
+        auto add=[&](EdVec p){for(auto q:points)if(length(edSub(p,q))<1e-8)return;points.push_back(p);};
+        auto side=[&](EdVec p){return p.z-(heightAt(fits[seam.a],p)+heightAt(fits[seam.b],p))*.5;};
+        for(int v=0;v<face.count;v++){EdVec a=face.v[v].p,b=face.v[(v+1)%face.count].p;double da=side(a),db=side(b);
+            if(fabs(da)<1e-10)add(a);
+            if((da<0&&db>0)||(da>0&&db<0))add(edAdd(a,edScale(edSub(b,a),da/(da-db))));
+        }return points;
+    };
+    for(int a=0;a<model->count;a++)if(fits[a].partial)for(int f=0;f<model->c[a].count;f++){
+        auto &face=model->c[a].f[f];int b=face.neighbor;
+        if(b<=a||!fits[b].partial||!(edSurfaceAttributes(&face).adjoinFlags&2)||(edSurfaceAttributes(&face).surfaceFlags&4))continue;
+        // A stream above an opening and a pool below it do not share a
+        // waterline yet. Do not pull the stream through the channel floor.
+        bool bothCross=true;
+        for(int sector:{a,b}){double lo=1e30,hi=-1e30;
+            for(int v=0;v<face.count;v++){auto point=face.v[v].p;double d=point.z-heightAt(fits[sector],point);lo=fmin(lo,d);hi=fmax(hi,d);}
+            bothCross&=lo<=ED_EPS&&hi>=-ED_EPS;
+        }
+        if(bothCross)seams.push_back({a,b,f});
+    }
+    bool matched=seams.empty();
+    for(int iteration=0;iteration<20000&&!matched;iteration++){
+        for(auto seam:seams){auto &a=fits[seam.a];auto &b=fits[seam.b];auto points=seamPoints(seam);if(points.size()<2)continue;
+            for(auto point:points){
+                EdVec da=edV(point.x-a.origin.x,point.y-a.origin.y,1),db=edV(point.x-b.origin.x,point.y-b.origin.y,1);
+                EdVec ma=edScale(a.basin?edV(0,0,1):da,1/fmax(a.weight,1e-12));
+                EdVec mb=edScale(b.basin?edV(0,0,1):db,1/fmax(b.weight,1e-12));
+                double residual=heightAt(a,point)-heightAt(b,point),step=residual/(edDot(da,ma)+edDot(db,mb));
+                a.plane=edSub(a.plane,edScale(ma,step));b.plane=edAdd(b.plane,edScale(mb,step));
+            }
+        }
+        double floorCorrection=0;for(int c=0;c<model->count;c++)floorCorrection=fmax(floorCorrection,keepAboveFloor(c));
+        matched=floorCorrection<1e-9;for(auto seam:seams){auto points=seamPoints(seam);if(points.size()<2)continue;
+            for(auto point:points)if(fabs(heightAt(fits[seam.a],point)-heightAt(fits[seam.b],point))>1e-9)matched=false;
+        }
+    }
+    if(!matched){error="Could not align water planes across connected adjoins.";return 0;}
+    for(int sector=0;sector<model->count;sector++){
+        auto &fit=fits[sector];if(getenv("GEOSITH_WATER_SIM_MAP_TEST"))fprintf(stderr,"WATER FIT %d: samples=%zu pooled=%g basin=%d partial=%d slope=(%g,%g) height=%g\n",sector,fit.samples.size(),fit.pooled,fit.basin,fit.partial,fit.plane.x,fit.plane.y,fit.plane.z);if(!fit.partial)continue;
+        EdVec flow=edScale(fit.flow,1/fit.volume);
+        EdVec normal=unit(edV(-fit.plane.x,-fit.plane.y,1));
+        double distance=edDot(normal,edV(fit.origin.x,fit.origin.y,fit.plane.z));
+        EdCell above,below;
+        if(!cellclip(&model->c[sector],normal,distance,&above)||!cellclip(&model->c[sector],edScale(normal,-1),-distance,&below)){error="Could not fit a valid water surface to this sector.";return 0;}
+        if(!below.count)continue;
+        any=true;
+        if(!above.count){wet[sector]=1;currents[sector]=flow;continue;}
+        work.c[sector]=std::move(above);wet[work.count]=1;currents.push_back(flow);work.c[work.count++]=std::move(below);
+    }
+    if(!any){error="No water has accumulated yet.";return 0;}
+    for(int c=0;c<work.cogCount;c++)for(int p=0;p<work.cogs[c].count;p++){
+        auto &param=work.cogs[c].params[p];if(param.type==ED_COG_SURFACE&&param.cell>=0&&param.cell<model->count&&param.face>=0&&param.face<model->c[param.cell].count)remapCogSurface(&param,&model->c[param.cell].f[param.face],&work);
+    }
+    if(!edResolve(&work)){error=edGeometryFailure();return 0;}
+    if(!edGenerateWater(&work,wet,material)){error="Generated water sectors failed validation.";return 0;}
+    // JK chooses walking/swimming from the player's origin sector. Its
+    // standing height is the floor-to-origin distance, not the eye height.
+    // A face has only one footstep material: use its deepest corner.
+    for(int s=0;s<work.count;s++)if(wet[s])for(int f=0;f<work.c[s].count;f++){
+        auto &floor=work.c[s].f[f];if(floor.neighbor>=0||edNormal(&floor).z<.5)continue;
+        double depth=0;bool shallow=standingHeight>0;
+        for(int v=0;v<floor.count&&shallow;v++){
+            EdVec p=floor.v[v].p;double exit=1e30;int top=-1;
+            for(int k=0;k<work.c[s].count;k++){auto &face=work.c[s].f[k];EdVec n=edNormal(&face);if(n.z>=-1e-8)continue;
+                double d=edDot(n,edSub(face.v[0].p,p))/n.z;
+                if(d>=-ED_EPS&&d<exit){exit=fmax(0,d);top=k;}
+            }
+            if(top<0){shallow=false;break;}
+            auto &surface=work.c[s].f[top];
+            if(surface.neighbor<0||(work.c[surface.neighbor].flags&2)||exit>=standingHeight){shallow=false;break;}
+            depth=fmax(depth,exit);
+        }
+        if(!shallow||depth<=ED_EPS)continue;
+        floor.attributes=edSurfaceAttributes(&floor);floor.hasAttributes=1;
+        // Metal/dirt take priority over water sounds, so replace that material
+        // category while preserving collision, floor and other surface flags.
+        floor.attributes.surfaceFlags&=~(0x10000u|0x20000u|0x40000u|0x80000u|0x100000u);
+        floor.attributes.surfaceFlags|=depth<standingHeight/3?0x40000u:depth<standingHeight*2/3?0x20000u:0x100000u;
+    }
+    // Sector thrust is a runtime property in JK; persist it through a startup COG.
+    for(int s=0;s<work.count;s++)if(wet[s]){
+        auto &cell=work.c[s];cell.thrust=edScale(currents[s],2);
+        if(edDot(cell.thrust,cell.thrust)>1e-16)cell.flags|=8u;else cell.flags&=~8u;
+        int slot=work.cogCount;
+        for(int c=0;c<work.cogCount;c++)if(!strcmp(work.cogs[c].file,"gs_waterthrust.cog")&&work.cogs[c].params[0].cell==s){slot=c;break;}
+        if(slot>=ED_COGS){error="Water currents exceed the level COG limit.";return 0;}
+        EdPlacedCog cog={};if(!edCogParseScript(&cog,"gs_waterthrust.cog",edWaterThrustScript)){error="Could not prepare the water current COG.";return 0;}
+        cog.params[0].cell=s;cog.params[0].face=-1;
+        snprintf(cog.params[1].value,sizeof(cog.params[1].value),"(%.4g/%.4g/%.4g)",cell.thrust.x,cell.thrust.y,cell.thrust.z);
+        work.cogs[slot]=cog;if(slot==work.cogCount)work.cogCount++;
+    }
+    for(int s=0;s<work.count;s++)if(wet[s])for(int f=0;f<work.c[s].count;f++){
+        auto &face=work.c[s].f[f];int n=face.neighbor;if(n<0||work.c[n].flags&2)continue;
+        if(work.cogCount>=ED_COGS){error="Water surfaces exceed the level COG limit.";return 0;}
+        EdVec normal=edNormal(&face),velocity=edSub(currents[s],edScale(normal,edDot(normal,currents[s])));double speed=sqrt(edDot(velocity,velocity));
+        // SlideWall assumes an orthogonal UV basis with the same handedness
+        // as (edge, normal cross edge). Dominant-axis mapping can mirror it
+        // on steep faces, reversing one component of the visible current.
+        for(EdFace *surface:{&face,&work.c[n].f[face.mirror]}){
+            EdVec u=unit(edSub(surface->v[1].p,surface->v[0].p)),v=edCross(edNormal(surface),u);
+            surface->customUV=1;surface->uOffset=surface->vOffset=surface->uvRotation=0;
+            for(int k=0;k<surface->count;k++){auto &vertex=surface->v[k];vertex.u=edDot(vertex.p,u)*ED_UV_SCALE;vertex.v=edDot(vertex.p,v)*ED_UV_SCALE;}
+        }
+        EdVec direction=speed>1e-8?edScale(velocity,1/speed):edV(1,0,0);EdPlacedCog cog=conveyor;int surfaces=0;
+        for(int p=0;p<cog.count;p++){
+            auto &param=cog.params[p];
+            if(param.type==ED_COG_SURFACE){if(surfaces<2){param.cell=surfaces?n:s;param.face=surfaces?face.mirror:f;strcpy(param.value,"0");}else{param.cell=param.face=-1;strcpy(param.value,"-1");}surfaces++;}
+            else if(!strcmp(param.name,"vec0"))snprintf(param.value,sizeof(param.value),"(%.4g/%.4g/%.4g)",direction.x,direction.y,direction.z);
+            else if(!strcmp(param.name,"speed"))snprintf(param.value,sizeof(param.value),"%.6g",fmin(speed*20,200));
+        }
+        if(surfaces<2){error="The conveyor COG must expose at least two surface parameters.";return 0;}
+        work.cogs[work.cogCount++]=cog;
+    }
+    if(!edValidate(&work)){error="Water conversion failed final geometry or COG validation.";return 0;}
+    *model=std::move(work);return 1;
+}
+int edGenerateWater(EdModel *m,const EdBuffer<unsigned char> &selected,int material){
+    if(!m||material<0)return 0;
+    auto storage=std::make_unique<EdModel>(*m);EdModel &work=*storage;int count=0;
+    // Mark the entire selection first, so shared internal adjoins stay unchanged.
+    for(int s=0;s<work.count;s++)if(selected[s]){
+        EdCell &cell=work.c[s];if(cell.splineId)return 0;
+        cell.flags|=2u;strcpy(cell.sound,"00underwater.wav");cell.soundVolume=.25;cell.tint=edV(.1,.1,1);count++;
+    }
+    if(!count)return 0;
+    for(int s=0;s<work.count;s++)if(selected[s])for(int f=0;f<work.c[s].count;f++){
+        EdFace &face=work.c[s].f[f];if(face.neighbor<0)continue;
+        if(face.neighbor>=work.count||face.mirror<0||face.mirror>=work.c[face.neighbor].count)return 0;
+        if(work.c[face.neighbor].flags&2u)continue;
+        if(work.c[face.neighbor].splineId)return 0;
+        EdFace &other=work.c[face.neighbor].f[face.mirror];if(other.neighbor!=s||other.mirror!=f)return 0;
+        for(EdFace *p:{&face,&other}){
+            p->attributes=edSurfaceAttributes(p);p->hasAttributes=1;
+            p->attributes.faceFlags|=2u;p->attributes.geometryMode=4;
+            p->material=material;
+            if(p->decalId){p->decalId=0;p->customUV=0;p->uOffset=p->vOffset=p->uvRotation=0;edMapFace(p);}
+        }
+    }
+    edCompactDecals(&work);if(!edValidate(&work))return 0;*m=std::move(work);return 1;
+}
+
+#include "edHazardScript.h"
+int edGenerateHazard(EdModel *m,const EdBuffer<unsigned char> &selected,int material,int kind){
+    if(!m||kind<0||kind>2||(kind<2&&material<0))return 0;
+    auto copy=std::make_unique<EdModel>(*m);EdModel &work=*copy;int count=0;
+    for(int c=0;c<work.count;c++)if(selected[c]){
+        EdCell &cell=work.c[c];if(cell.splineId)return 0;count++;
+        if(kind==1){cell.flags|=2u;strcpy(cell.sound,"00underwater.wav");cell.soundVolume=.25;}
+        else {cell.flags&=~2u;if(!strcmp(cell.sound,"00underwater.wav")){cell.sound[0]=0;cell.soundVolume=0;}}
+        cell.tint=kind==0?edV(1,.1,.1):kind==1?edV(1,1,.1):edV(0,0,0);
+        int slot=work.cogCount;
+        for(int i=0;i<work.cogCount;i++)if(!strcmp(work.cogs[i].file,"gs_hazard.cog")&&work.cogs[i].params[0].cell==c){slot=i;break;}
+        if(slot>=ED_COGS)return 0;
+        EdPlacedCog cog={};if(!edCogParseScript(&cog,"gs_hazard.cog",edHazardScript))return 0;
+        cog.params[0].cell=c;cog.params[0].face=-1;snprintf(cog.params[1].value,32,"%d",kind);
+        work.cogs[slot]=cog;if(slot==work.cogCount)work.cogCount++;
+        for(int f=0;f<cell.count;f++){
+            EdFace &face=cell.f[f];if(face.neighbor<0||(kind!=2&&selected[face.neighbor]))continue;
+            if(face.neighbor>=work.count||face.mirror<0||face.mirror>=work.c[face.neighbor].count||work.c[face.neighbor].splineId)return 0;
+            EdFace &other=work.c[face.neighbor].f[face.mirror];if(other.neighbor!=c||other.mirror!=f)return 0;
+            for(EdFace *p:{&face,&other}){
+                p->attributes=edSurfaceAttributes(p);p->hasAttributes=1;p->attributes.geometryMode=kind==2?0:4;p->attributes.faceFlags&=~2u;if(kind<2)p->material=material;
+                if(p->decalId){p->decalId=0;p->customUV=0;p->uOffset=p->vOffset=p->uvRotation=0;edMapFace(p);}
+            }
+        }
+    }
+    if(!count)return 0;edCompactDecals(&work);if(!edValidate(&work))return 0;*m=std::move(work);return 1;
+}
+
+int edGenerateSlashGrate(EdModel *m,EdHit hit,int material,const EdPlacedCog &script){
+    if(!m||!validHit(m,hit)||material<0||strcmp(script.file,"00_slashgrate.cog"))return 0;
+    const EdFace &front=m->c[hit.cell].f[hit.face];int backCell=front.neighbor,backFace=front.mirror;
+    if(backCell<0||backCell>=m->count||backFace<0||backFace>=m->c[backCell].count||m->c[hit.cell].splineId||m->c[backCell].splineId)return 0;
+    const EdFace &back=m->c[backCell].f[backFace];if(back.neighbor!=hit.cell||back.mirror!=hit.face)return 0;
+    EdPlacedCog cog=script;int assigned=0;
+    for(int i=0;i<cog.count;i++){EdCogParam &p=cog.params[i];if(p.type!=ED_COG_SURFACE)continue;
+        if(!strcmp(p.name,"grate")){p.cell=hit.cell;p.face=hit.face;assigned|=1;}
+        else if(!strcmp(p.name,"grateback")){p.cell=backCell;p.face=backFace;assigned|=2;}
+    }
+    if(assigned!=3)return 0;
+    // Reapplying this generator must not install a second damage handler.
+    int slot=m->cogCount;
+    for(int i=0;i<m->cogCount;i++)if(!strcmp(m->cogs[i].file,script.file))for(int j=0;j<m->cogs[i].count;j++){
+        const EdCogParam &p=m->cogs[i].params[j];if(p.type==ED_COG_SURFACE&&((p.cell==hit.cell&&p.face==hit.face)||(p.cell==backCell&&p.face==backFace)))slot=i;
+    }
+    if(slot==m->cogCount&&m->cogCount>=ED_COGS)return 0;
+    auto storage=std::make_unique<EdModel>(*m);EdModel &work=*storage;work.cogs[slot]=cog;if(slot==work.cogCount)work.cogCount++;
+    for(EdFace *face:{&work.c[hit.cell].f[hit.face],&work.c[backCell].f[backFace]}){
+        face->attributes=edSurfaceAttributes(face);face->hasAttributes=1;
+        face->attributes.surfaceFlags=(face->attributes.surfaceFlags|2u)&~4u;
+        face->attributes.adjoinFlags=(face->attributes.adjoinFlags|5u)&~2u;
+        face->attributes.geometryMode=4;face->attributes.textureMode=1;
+        face->material=material;face->decalId=0;face->customUV=0;edMapFace(face);
+    }
+    if(!edValidate(&work))return 0;*m=std::move(work);return 1;
+}

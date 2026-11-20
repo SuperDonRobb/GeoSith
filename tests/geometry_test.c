@@ -675,6 +675,21 @@ static void readGeometryFixture(const char *filename){
     }fclose(file);
 }
 static void mergeSectorTests(void){
+    // Geometry-only snapshot of Monolith sectors 615/617. Their left walls
+    // bend inward by 0.0000126 units; reject without modifying the document.
+    readGeometryFixture("monolith_merge_fixture.txt");CHECK(edValidate(m));*backup=*m;
+    EdBuffer<unsigned char> reportSelected;reportSelected[0]=reportSelected[1]=1;int reportMerged=-1;char reason[192];
+    CHECK(!edMergeSectors(m,reportSelected,&reportMerged,reason,sizeof(reason))&&edModelsEqual(m,backup));
+    CHECK(strstr(reason,"non-convex")&&strstr(reason,"sector 0, surface 5")&&strstr(reason,"Sector 1"));
+    for(int s=0;s<2;s++)for(int f=0;f<backup->c[s].count;f++)if(backup->c[s].f[f].neighbor<0){
+        *m=*backup;CHECK(edExtrudeStep(m,s,f)&&edValidate(m));
+        for(int c=0;c<m->count;c++)for(int k=0;k<m->c[c].count;k++){auto &p=m->c[c].f[k];auto a=edSurfaceAttributes(&p);if(p.neighbor>=0)CHECK(!(a.surfaceFlags&4)&&a.geometryMode==0&&(a.adjoinFlags&2));}
+    }
+    // The right walls have different pitch. Normal extrusions diverge; the
+    // existing horizontal extrusion mode gives them a shared, passable seam.
+    *m=*backup;EdSelection pair={};pair.count=2;pair.hits[0]={0,3,-1,-1};pair.hits[1]={1,2,-1,-1};
+    CHECK(edExtrudeSelectionHorizontal(m,&pair)&&edValidate(m));int seam=0;
+    for(int f=0;f<m->c[2].count;f++)if(m->c[2].f[f].neighbor==3){auto a=edSurfaceAttributes(&m->c[2].f[f]);CHECK(!(a.surfaceFlags&4)&&a.geometryMode==0&&(a.adjoinFlags&2));seam++;}CHECK(seam==1);
     edDefault(m);m->c[0].extraLight=.3;m->c[0].flags=1;m->c[0].tint=edV(.1,.2,.3);strcpy(m->c[0].colormap,"01narsh.cmp");strcpy(m->c[0].layer,"Main rooms");
     CHECK(edExtrudeStep(m,0,4));
     m->cogCount=1;strcpy(m->cogs[0].file,"test.cog");m->cogs[0].count=3;
@@ -761,14 +776,79 @@ static void cleanupTests(void){
     CHECK(edCleanupSector(m,0));CHECK(m->c[0].f[4].count==4&&edValidate(m));
     *backup=*m;CHECK(!edCleanupSector(m,-1)&&!edCompare(m,backup,sizeof(*m)));edDefault(m);
 }
+#include "diamond_beam_fixture.h"
 static void deleteHandleTests(void){
+    // Selection cleaves use exact picked coordinates, including off-grid ones.
+    edDefault(m);for(int f=0;f<m->c[0].count;f++)for(int v=0;v<m->c[0].f[f].count;v++)m->c[0].f[f].v[v].p.x+=.013;
+    EdSelection cut={};cut.count=2;cut.hits[0]={0,0,0,-1};cut.hits[1]={0,0,2,-1};double cutVolume=totalVolume(m);
+    CHECK(edCleaveSelection(m,&cut)==1&&m->count==1&&m->c[0].count==7&&edValidate(m));CHECK(fabs(totalVolume(m)-cutVolume)<1e-8);
+    for(int f=0;f<m->c[0].count;f++)for(int v=0;v<m->c[0].f[f].count;v++)CHECK(fabs(fabs(m->c[0].f[f].v[v].p.x-.013)-1)<1e-9);
+    edDefault(m);cut.hits[0]=deleteEdgeHit(0,edV(-1,-1,0),edV(-1,-1,1));cut.hits[1]=deleteEdgeHit(0,edV(1,1,0),edV(1,1,1));
+    CHECK(edCleaveSelection(m,&cut)==2&&m->count==2&&edValidate(m)&&portals()==2&&fabs(totalVolume(m)-4)<1e-8);
+    // Skew edges on adjacent faces use a midpoint cut; adjacent vertices already have an edge.
+    edDefault(m);*backup=*m;cut.hits[0]=deleteEdgeHit(0,edV(-1,-1,0),edV(-1,-1,1));cut.hits[1]=deleteEdgeHit(0,edV(-1,1,1),edV(1,1,1));
+    CHECK(!edCleaveSelection(m,&cut)&&edModelsEqual(m,backup));edDefault(m);*backup=*m;cut.hits[0]={0,0,0,-1};cut.hits[1]={0,0,1,-1};CHECK(!edCleaveSelection(m,&cut)&&edModelsEqual(m,backup));
+    // A warped diamond beam preserves the entire selected end faces.
+    int connections=0;
+    for(int e=0;e<4;e++)for(int f=0;f<4;f++){
+        diamondBeamFixture(m);*backup=*m;cut.hits[0]={0,0,-1,e};cut.hits[1]={0,12,-1,f};
+        int result=edCleaveSelection(m,&cut);
+        if(!result){CHECK(edModelsEqual(m,backup));continue;}
+        connections++;CHECK(edValidate(m)&&fabs(totalVolume(m)-4)<1e-8);
+        for(int original:{0,12}){bool intact=false;
+            for(int c=0;c<m->count;c++)for(int face=0;face<m->c[c].count;face++){
+                int matches=0;for(int v=0;v<4;v++)for(int w=0;w<m->c[c].f[face].count;w++)if(edDot(edSub(backup->c[0].f[original].v[v].p,m->c[c].f[face].v[w].p),edSub(backup->c[0].f[original].v[v].p,m->c[c].f[face].v[w].p))<1e-12){matches++;break;}
+                if(matches==4)intact=true;
+            }CHECK(intact);
+        }
+    }CHECK(connections>=4);
+    // A full-face beam applies all supporting side planes in one transaction.
+    diamondBeamFixture(m);*backup=*m;cut.hits[0]={0,0,-1,-1};cut.hits[1]={0,12,-1,-1};
+    CHECK(edCleaveSelection(m,&cut)==3&&edValidate(m)&&fabs(totalVolume(m)-4)<1e-8);
+    for(int original:{0,12}){bool intact=false;for(int f=0;f<m->c[0].count;f++){
+        int matches=0;for(int v=0;v<backup->c[0].f[original].count;v++)for(int w=0;w<m->c[0].f[f].count;w++)if(edDot(edSub(backup->c[0].f[original].v[v].p,m->c[0].f[f].v[w].p),edSub(backup->c[0].f[original].v[v].p,m->c[0].f[f].v[w].p))<1e-12){matches++;break;}
+        if(matches==backup->c[0].f[original].count)intact=true;
+    }CHECK(intact);}
+    // Outside the oriented enclosure, partition faces use only the original
+    // room planes or the six box planes, never extended beam side planes.
+    {
+        EdVec centers[2]={};int ends[2]={0,12};for(int e=0;e<2;e++)for(int v=0;v<backup->c[0].f[ends[e]].count;v++)centers[e]=edAdd(centers[e],edScale(backup->c[0].f[ends[e]].v[v].p,1.0/backup->c[0].f[ends[e]].count));
+        auto normalized=[](EdVec v){return edScale(v,1/sqrt(edDot(v,v)));};
+        EdVec axis=normalized(edSub(centers[1],centers[0])),reference=fabs(axis.z)<.9?edV(0,0,1):edV(0,1,0),across=normalized(edCross(reference,axis)),up=normalized(edCross(axis,across));
+        EdVec axes[3]={across,up,axis};double low[3]={1e30,1e30,1e30},high[3]={-1e30,-1e30,-1e30};
+        for(int k=0;k<3;k++)for(int end:ends)for(int v=0;v<backup->c[0].f[end].count;v++){double d=edDot(axes[k],backup->c[0].f[end].v[v].p);low[k]=fmin(low[k],d);high[k]=fmax(high[k],d);}
+        int outsideCells=0;for(int c=0;c<m->count;c++){
+            EdVec center={};int count=0;for(int f=0;f<m->c[c].count;f++)for(int v=0;v<m->c[c].f[f].count;v++){center=edAdd(center,m->c[c].f[f].v[v].p);count++;}center=edScale(center,1.0/count);
+            bool outside=false;for(int k=0;k<3;k++){double d=edDot(axes[k],center);outside|=d<low[k]-ED_EPS||d>high[k]+ED_EPS;}if(!outside)continue;outsideCells++;
+            for(int f=0;f<m->c[c].count;f++){EdVec n=edNormal(&m->c[c].f[f]);bool allowed=false;
+                for(EdVec ax:axes)allowed|=fabs(edDot(n,ax))>.99999;
+                for(int old=0;old<backup->c[0].count;old++)allowed|=fabs(edDot(n,edNormal(&backup->c[0].f[old])))>.99999;
+                CHECK(allowed);
+            }
+        }CHECK(outsideCells>0);
+    }
+    *backup=*m;cut.hits[1]=cut.hits[0];CHECK(!edCleaveSelection(m,&cut)&&edModelsEqual(m,backup));
+    // Adjoin surfaces split on both sides, retaining reciprocal links.
+    edDefault(m);CHECK(edExtrudeStep(m,0,4));cut.hits[0]={0,4,0,-1};cut.hits[1]={0,4,2,-1};
+    CHECK(edCleaveSelection(m,&cut)==1&&edValidate(m)&&portals()==4);
+    // Dissolve a diagonal in a warped wall by restoring just its outlier.
+    edDefault(m);EdFace flat=m->c[0].f[4];EdVec diagonalA=flat.v[0].p,diagonalB=flat.v[2].p;
+    CHECK(edCleave(m,0,4,diagonalA,diagonalB));EdVec outlier=flat.v[1].p;
+    for(int f=0;f<m->c[0].count;f++)for(int v=0;v<m->c[0].f[f].count;v++)if(edDot(edSub(m->c[0].f[f].v[v].p,outlier),edSub(m->c[0].f[f].v[v].p,outlier))<1e-12)m->c[0].f[f].v[v].p.y-=.1;
+    CHECK(edValidate(m));EdHit warped=deleteEdgeHit(0,diagonalA,diagonalB);CHECK(warped.cell==0);
+    CHECK(edDeleteHandle(m,warped)&&edValidate(m)&&m->c[0].count==6);
+    // All four original corners remain, and no other vertices were displaced.
+    for(int f=0;f<m->c[0].count;f++)for(int v=0;v<m->c[0].f[f].count;v++){
+        EdVec p=m->c[0].f[f].v[v].p;CHECK(fabs(fabs(p.x)-1)<1e-8&&fabs(fabs(p.y)-1)<1e-8&&(fabs(p.z)<1e-8||fabs(p.z-1)<1e-8));
+    }
     edDefault(m);EdFace quad=m->c[0].f[4];EdVec a=quad.v[0].p,b=quad.v[2].p;
     CHECK(edCleave(m,0,4,a,b));CHECK(m->c[0].count==7);EdHit edge=deleteEdgeHit(0,a,b);CHECK(edge.cell==0);
     m->c[0].f[edge.face].material=17;m->c[0].f[edge.face].uOffset=12;
     CHECK(edDeleteHandle(m,edge));CHECK(edValidate(m)&&m->c[0].count==6&&fabs(totalVolume(m)-4)<1e-8);
     int found=0;for(int f=0;f<m->c[0].count;f++)if(edDot(edNormal(&m->c[0].f[f]),edNormal(&quad))>.99999){CHECK(m->c[0].f[f].count==4&&m->c[0].f[f].material==17&&m->c[0].f[f].uOffset==12);found++;}CHECK(found==1);
-    /* A real corner/crease cannot be removed to leave open or twisted faces. */
-    edDefault(m);*backup=*m;CHECK(!edDeleteHandle(m,EdHit{0,4,-1,0}));CHECK(!edCompare(m,backup,sizeof(*m)));
+    /* A real crease may flatten too, but only to a closed convex volume. */
+    edDefault(m);CHECK(edDeleteHandle(m,EdHit{0,4,-1,0}));CHECK(edValidate(m)&&m->c[0].count<6&&totalVolume(m)>0);
+    edDefault(m);*backup=*m;
     CHECK(!edDeleteHandle(m,EdHit{0,4,0,-1}));CHECK(!edCompare(m,backup,sizeof(*m)));
     /* Deleting the center of a triangle fan leaves one quad and remaps COGs. */
     EdVec center=deleteFan(0,4);m->cogCount=1;strcpy(m->cogs[0].file,"test.cog");m->cogs[0].count=2;
@@ -1130,16 +1210,21 @@ static void splineTests(void){
     spline.points[0]={edV(4,0,.5),edV(0,1,0)};spline.points[1]={edV(4,3,.5),edV(1,1,0)};spline.points[2]={edV(7,4,.5),edV(1,0,0)};
     if(!edSplineRebuild(&out,&original,&spline)||!edValidate(&out)||out.splineCount!=1||out.count!=9){fprintf(stderr,"Spline generation failed\n");{fprintf(stderr,"Spline test line %d\n",__LINE__);exit(2);}}
     {
-        auto flagsModel=std::make_unique<EdModel>();EdSpline flagged=out.splines[0];flagged.sectorFlags=3;flagged.sectorFlagsMask=3;flagged.hasSectorTint=1;flagged.sectorTint=edV(.1,.2,.3);
+        auto flagsModel=std::make_unique<EdModel>();EdSpline flagged=out.splines[0];flagged.sectorFlags=3;flagged.sectorFlagsMask=3;flagged.hasSectorTint=1;flagged.sectorTint=edV(.1,.2,.3);flagged.windSpeed=2;flagged.surfaceFlags=0x80000;flagged.surfaceFlagsMask=0x90000;
         CHECK(edSplineUpdate(flagsModel.get(),&out,&flagged)&&!flagsModel->splines[0].invalid);
         for(int c=0;c<flagsModel->count;c++)CHECK((flagsModel->c[c].flags&3)==(flagsModel->c[c].splineId?3:0));
-        flagged=flagsModel->splines[0];flagged.segments=6;flagged.sectorFlags=2;flagged.mirrorAxes=1;
+        for(int c=1;c<flagsModel->count;c++)for(int f=0;f<flagsModel->c[c].count;f++)CHECK((edSurfaceAttributes(&flagsModel->c[c].f[f]).surfaceFlags&0x90000)==(flagsModel->c[c].f[f].neighbor>=0?0:0x80000));
+        CHECK(flagsModel->cogCount==8);for(int c=1;c<flagsModel->count;c++){CHECK(fabs(edDot(flagsModel->c[c].thrust,flagsModel->c[c].thrust)-4)<1e-7);CHECK(flagsModel->c[c].thrust.y>=0);}
+        flagged=flagsModel->splines[0];flagged.surfaceFlags=0x10000;flagged.windSpeed=-2;flagged.segments=6;flagged.sectorFlags=2;flagged.mirrorAxes=1;
         auto rebuilt=std::make_unique<EdModel>();CHECK(edSplineUpdate(rebuilt.get(),flagsModel.get(),&flagged)&&!rebuilt->splines[0].invalid);
         for(int c=0;c<rebuilt->count;c++)if(rebuilt->c[c].splineId)CHECK((rebuilt->c[c].flags&3)==2&&fabs(rebuilt->c[c].tint.y-.2)<1e-9);
+        for(int c=1;c<rebuilt->count;c++)for(int f=0;f<rebuilt->c[c].count;f++)CHECK((edSurfaceAttributes(&rebuilt->c[c].f[f]).surfaceFlags&0x90000)==(rebuilt->c[c].f[f].neighbor>=0?0:0x10000));
+        CHECK(rebuilt->cogCount==12);for(int c=1;c<rebuilt->count;c++){CHECK(fabs(edDot(rebuilt->c[c].thrust,rebuilt->c[c].thrust)-4)<1e-7);CHECK(rebuilt->c[c].thrust.y<=0);}
         unsigned size=0;unsigned char *wire=edWireEncode(rebuilt.get(),&size);CHECK(wire&&edWireDecode(flagsModel.get(),wire,size)&&edModelsEqual(flagsModel.get(),rebuilt.get()));edFree(wire);
         CHECK(edWriteGob(rebuilt.get(),"test-spline-flags.gob","Spline flags",0,"SECTION: HEADER\n"));
         FILE *f=fopen("test-spline-flags.gob","rb");CHECK(f);fseek(f,0,SEEK_END);long sizeGob=ftell(f);rewind(f);std::vector<char> text(sizeGob+1);CHECK(fread(text.data(),1,sizeGob,f)==sizeGob);fclose(f);
-        flagsModel->splines[0].hasSectorTint=0;flagsModel->splines[0].sectorTint={};flagsModel->splines[0].sectorFlags=flagsModel->splines[0].sectorFlagsMask=0;edSplineReadMetadata(flagsModel.get(),text.data()+12);CHECK(edModelsEqual(flagsModel.get(),rebuilt.get()));remove("test-spline-flags.gob");
+        flagsModel->splines[0].surfaceFlags=flagsModel->splines[0].surfaceFlagsMask=0;flagsModel->splines[0].windSpeed=0;flagsModel->splines[0].hasSectorTint=0;flagsModel->splines[0].sectorTint={};flagsModel->splines[0].sectorFlags=flagsModel->splines[0].sectorFlagsMask=0;edSplineReadMetadata(flagsModel.get(),text.data()+12);CHECK(edModelsEqual(flagsModel.get(),rebuilt.get()));remove("test-spline-flags.gob");
+        flagged=rebuilt->splines[0];flagged.windSpeed=0;auto noWind=std::make_unique<EdModel>();CHECK(edSplineUpdate(noWind.get(),rebuilt.get(),&flagged)&&noWind->cogCount==0);for(int c=1;c<noWind->count;c++)CHECK(edDot(noWind->c[c].thrust,noWind->c[c].thrust)<1e-12);
         CHECK(edSplineConvert(flagsModel.get(),1));for(int c=1;c<flagsModel->count;c++)CHECK((flagsModel->c[c].flags&3)==2);
     }
     for(int i=1;i<out.count;i++){int adjoins=0;for(int f=0;f<out.c[i].count;f++)adjoins+=out.c[i].f[f].neighbor>=0;if(!adjoins){fprintf(stderr,"Spline test line %d\n",__LINE__);exit(2);}}
@@ -1314,6 +1399,124 @@ static void arrayTests(void){
     puts("PASS: six array directions, multi-sector groups, regeneration, bent textured spline groups, wire and saved metadata");
 }
 int main(int argc,char **argv) {
+    {
+        auto base=std::make_unique<EdModel>();edDefault(base.get());
+        for(int f=0;f<6;f++)for(int v=0;v<base->c[0].f[f].count;v++)if(base->c[0].f[f].v[v].p.z>.9)base->c[0].f[f].v[v].p.z=6;
+        auto original=std::make_unique<EdModel>(*base);auto stairs=std::make_unique<EdModel>();
+        for(int steps:{8,16,31,64}){CHECK(edCreateSpiralStairs(stairs.get(),base.get(),0,steps,.17,1));CHECK(edValidate(stairs.get()));CHECK(edModelsEqual(base.get(),original.get()));CHECK(stairs->count>=steps);
+            int ramps=0;for(int c=0;c<stairs->count;c++)for(int f=0;f<stairs->c[c].count;f++){const EdFace &face=stairs->c[c].f[f];auto attr=edSurfaceAttributes(&face);if(face.neighbor>=0&&(attr.surfaceFlags&5)==5&&attr.geometryMode==0){CHECK(!(attr.adjoinFlags&2));ramps++;}}
+            CHECK(ramps>=steps*4);
+            // The second revolution has usable air beneath its floating slab.
+            if(steps>16){EdVec p=edV(.65*cos(.17+.1),.65*sin(.17+.1),.6);int inside=0;for(int c=0;c<stairs->count;c++)inside|=edContains(&stairs->c[c],p);CHECK(inside);}
+        }
+        auto hasAir=[](const EdModel &m,EdVec p){for(int c=0;c<m.count;c++)if(edContains(&m.c[c],p))return true;return false;};
+        EdVec gapPoint=edV(.65*cos(3.141592653589793*3/16),.65*sin(3.141592653589793*3/16),ED_GRID*.25);
+        CHECK(edCreateSpiralStairs(stairs.get(),base.get(),0,8,0,0,0));CHECK(!hasAir(*stairs,gapPoint));CHECK(hasAir(*stairs,edV(0,0,.5)));
+        CHECK(edCreateSpiralStairs(stairs.get(),base.get(),0,8,0,1,ED_GRID*.5));CHECK(hasAir(*stairs,gapPoint));CHECK(!hasAir(*stairs,edV(0,0,.5)));
+        CHECK(!edCreateSpiralStairs(stairs.get(),base.get(),0,8,0,0,ED_GRID));
+        auto saved=std::make_unique<EdModel>(*stairs);CHECK(!edCreateSpiralStairs(stairs.get(),base.get(),0,0));CHECK(edModelsEqual(saved.get(),stairs.get()));
+        CHECK(edExtrude(base.get(),0,4,edV(0,1,0)));CHECK(edCreateSpiralStairs(stairs.get(),base.get(),0,16,0,0));CHECK(edValidate(stairs.get()));
+    }
+
+    {
+        auto base=std::make_unique<EdModel>();edDefault(base.get());auto out=std::make_unique<EdModel>();auto original=std::make_unique<EdModel>(*base);
+        for(int f=0;f<6;f++)for(int e=0;e<4;e++){
+            CHECK(edBevel(out.get(),base.get(),EdHit{0,f,-1,e},ED_GRID));CHECK(edValidate(out.get())&&out->count==1&&out->c[0].count==7);CHECK(edModelsEqual(base.get(),original.get()));
+        }
+        CHECK(!edBevel(out.get(),base.get(),EdHit{0,0,-1,0},100));
+        {
+            EdSelection edges={};edges.count=2;edges.hits[0]={0,0,-1,0};edges.hits[1]={0,0,-1,1};
+            CHECK(edBevelSelection(out.get(),base.get(),&edges,ED_GRID)&&out->c[0].count==8&&out->count==1);
+            auto saved=std::make_unique<EdModel>(*out);CHECK(!edBevelSelection(out.get(),base.get(),&edges,100)&&edModelsEqual(out.get(),saved.get()));
+            edges.count=0;for(int f=0;f<6;f++)for(int e=0;e<4;e++)edges.hits[edges.count++]={0,f,-1,e};
+            CHECK(edBevelSelection(out.get(),base.get(),&edges,ED_GRID)&&edValidate(out.get())&&out->c[0].count==18);
+            auto joined=std::make_unique<EdModel>(*base);CHECK(edExtrude(joined.get(),0,4,edV(0,1,0)));CHECK(edExtrude(joined.get(),0,2,edV(0,-1,0)));
+            edges.count=3;edges.hits[0]={0,4,-1,0};edges.hits[1]={0,4,-1,1};edges.hits[2]={0,2,-1,0};
+            CHECK(edBevelSelection(out.get(),joined.get(),&edges,ED_GRID)&&out->count==5&&edValidate(out.get()));
+            int neighbor=joined->c[0].f[4].neighbor,mirror=joined->c[0].f[4].mirror;edges.hits[edges.count++]={neighbor,mirror,-1,0};
+            auto deduped=std::make_unique<EdModel>();CHECK(edBevelSelection(deduped.get(),joined.get(),&edges,ED_GRID)&&edModelsEqual(out.get(),deduped.get()));
+        }
+
+        for(int f=0;f<6;f++){
+            auto joined=std::make_unique<EdModel>(*base);CHECK(edExtrude(joined.get(),0,f,edScale(edNormal(&joined->c[0].f[f]),-.5)));
+            CHECK(edBevel(out.get(),joined.get(),EdHit{0,f,-1,0},ED_GRID)&&out->count==3&&edValidate(out.get()));
+        }
+
+        CHECK(edExtrude(base.get(),0,4,edV(0,1,0)));*original=*base;
+        CHECK(edBevel(out.get(),base.get(),EdHit{0,4,-1,0},ED_GRID)&&edValidate(out.get()));CHECK(out->count==3&&edModelsEqual(base.get(),original.get()));
+        // A straight tunnel must not acquire a wedge along its flat floors,
+        // ceilings or walls. The collar partitions volume without expanding it.
+        for(int c=0;c<out->count;c++)for(int f=0;f<out->c[c].count;f++)for(int v=0;v<out->c[c].f[f].count;v++){
+            EdVec p=out->c[c].f[f].v[v].p;CHECK(p.z>=-ED_EPS&&p.z<=1+ED_EPS&&fabs(p.x)<=1+ED_EPS);
+        }
+        {
+            auto slope=std::make_unique<EdModel>(*base);for(int c=0;c<slope->count;c++)for(int f=0;f<slope->c[c].count;f++)for(int v=0;v<slope->c[c].f[f].count;v++){EdVec &p=slope->c[c].f[f].v[v].p;p.z+=.3*p.y;}
+            auto beveled=std::make_unique<EdModel>();CHECK(edValidate(slope.get())&&edBevel(beveled.get(),slope.get(),EdHit{0,4,-1,0},ED_GRID));
+            for(int c=0;c<beveled->count;c++)for(int f=0;f<beveled->c[c].count;f++)for(int v=0;v<beveled->c[c].f[f].count;v++){EdVec p=beveled->c[c].f[f].v[v].p;CHECK(p.z-.3*p.y>=-ED_EPS&&p.z-.3*p.y<=1+ED_EPS);}
+        }
+        int portals=0;for(int c=0;c<out->count;c++)for(int f=0;f<out->c[c].count;f++)if(out->c[c].f[f].neighbor>=0){portals++;CHECK(edSurfaceAttributes(&out->c[c].f[f]).geometryMode==0);}CHECK(portals==4);
+        uint32_t size=0;unsigned char *wire=edWireEncode(out.get(),&size);auto decoded=std::make_unique<EdModel>();CHECK(wire&&edWireDecode(decoded.get(),wire,size)&&edModelsEqual(out.get(),decoded.get()));edFree(wire);
+        // Selecting the same physical edge through the solid floor still bevels the portal.
+        CHECK(edBevel(out.get(),base.get(),EdHit{0,0,-1,2},ED_GRID)&&out->count==3);
+        edDefault(base.get());CHECK(edCleave(base.get(),0,4,edV(0,1,0),edV(0,1,1)));
+        CHECK(edExtrude(base.get(),0,4,edV(0,1,0)));CHECK(edBevel(out.get(),base.get(),EdHit{0,4,-1,0},ED_GRID)&&edValidate(out.get()));
+        CHECK(out->count==3);CHECK(edContains(&out->c[0],edV(.7,0,.5)));
+    }
+    {
+        auto base=std::make_unique<EdModel>();edDefault(base.get());CHECK(edExtrude(base.get(),0,4,edV(0,1,0)));
+        EdBuffer<unsigned char> picked;picked[0]=1;int neighbor=base->c[0].f[4].neighbor,mirror=base->c[0].f[4].mirror;
+        for(int kind=0;kind<3;kind++){
+            auto hazard=std::make_unique<EdModel>(*base);CHECK(edGenerateHazard(hazard.get(),picked,7,kind)&&edValidate(hazard.get()));
+            CHECK(hazard->cogCount==1&&hazard->cogs[0].params[0].cell==0&&atoi(hazard->cogs[0].params[1].value)==kind);
+            CHECK(bool(hazard->c[0].flags&2)==(kind==1));if(kind<2)CHECK(hazard->c[0].tint.x==1&&hazard->c[0].tint.y==(kind==0?.1:1));
+            for(EdFace *f:{&hazard->c[0].f[4],&hazard->c[neighbor].f[mirror]})CHECK((kind==2||f->material==7)&&f->attributes.geometryMode==(kind==2?0:4)&&!(f->attributes.faceFlags&2)&&(f->attributes.adjoinFlags&2));
+            CHECK(edGenerateHazard(hazard.get(),picked,8,kind)&&hazard->cogCount==1);
+            uint32_t n=0;unsigned char *wire=edWireEncode(hazard.get(),&n);auto restored=std::make_unique<EdModel>();CHECK(wire&&edWireDecode(restored.get(),wire,n)&&edModelsEqual(hazard.get(),restored.get()));edFree(wire);
+        }
+        auto group=std::make_unique<EdModel>(*base);picked[neighbor]=1;CHECK(edGenerateHazard(group.get(),picked,7,0)&&group->cogCount==2);CHECK(!group->c[0].f[4].hasAttributes);
+        CHECK(edGenerateHazard(group.get(),picked,7,1));CHECK(group->c[0].flags&2);
+        CHECK(edGenerateHazard(group.get(),picked,-1,2));CHECK(!(group->c[0].flags&2)&&!group->c[0].sound[0]);
+        CHECK(group->c[0].f[4].attributes.geometryMode==0&&group->c[neighbor].f[mirror].attributes.geometryMode==0);
+        group->c[0].splineId=1;auto unchanged=std::make_unique<EdModel>(*group);CHECK(!edGenerateHazard(group.get(),picked,7,0)&&edModelsEqual(group.get(),unchanged.get()));
+    }
+    {
+        auto water=std::make_unique<EdModel>();edDefault(water.get());
+        CHECK(edExtrude(water.get(),0,4,edV(0,1,0)));
+        EdBuffer<unsigned char> selected;selected[0]=1;
+        int neighbor=water->c[0].f[4].neighbor,mirror=water->c[0].f[4].mirror;
+        auto before=std::make_unique<EdModel>(*water);
+        CHECK(edGenerateWater(water.get(),selected,7)&&edValidate(water.get()));
+        CHECK((water->c[0].flags&2)&&!strcmp(water->c[0].sound,"00underwater.wav")&&water->c[0].soundVolume==.25);
+        CHECK(water->c[0].tint.x==.1&&water->c[0].tint.y==.1&&water->c[0].tint.z==1);
+        CHECK(!(water->c[neighbor].flags&2)&&water->c[neighbor].sound[0]==0);
+        for(EdFace *f:{&water->c[0].f[4],&water->c[neighbor].f[mirror]})CHECK(f->material==7&&f->attributes.geometryMode==4&&(f->attributes.faceFlags&2)&&(f->attributes.adjoinFlags&2));
+        CHECK(water->c[0].f[0].material==before->c[0].f[0].material);
+        *water=*before;selected[neighbor]=1;
+        CHECK(edGenerateWater(water.get(),selected,7));
+        CHECK(water->c[0].f[4].material==before->c[0].f[4].material&&!water->c[0].f[4].hasAttributes);
+        *water=*before;selected[neighbor]=0;water->c[neighbor].flags|=2;
+        CHECK(edGenerateWater(water.get(),selected,7)&&water->c[0].f[4].material==before->c[0].f[4].material);
+        uint32_t size=0;unsigned char *wire=edWireEncode(water.get(),&size);CHECK(wire&&edWireDecode(before.get(),wire,size)&&edModelsEqual(water.get(),before.get()));edFree(wire);
+    }
+    {
+        auto grate=std::make_unique<EdModel>();edDefault(grate.get());
+        EdPlacedCog script={};CHECK(edCogParseScript(&script,"00_slashgrate.cog","symbols\nsurface grate mask=0x440\nsurface grateback mask=0x440\nend\n"));
+        EdHit hit={0,4,-1,-1};auto before=std::make_unique<EdModel>(*grate);
+        CHECK(!edGenerateSlashGrate(grate.get(),hit,7,script)&&edModelsEqual(grate.get(),before.get()));
+        CHECK(edExtrude(grate.get(),0,4,edV(0,1,0)));
+        int backCell=grate->c[0].f[4].neighbor,backFace=grate->c[0].f[4].mirror;
+        CHECK(edGenerateSlashGrate(grate.get(),hit,7,script)&&edValidate(grate.get())&&grate->cogCount==1);
+        CHECK(grate->cogs[0].params[0].cell==0&&grate->cogs[0].params[0].face==4);
+        CHECK(grate->cogs[0].params[1].cell==backCell&&grate->cogs[0].params[1].face==backFace);
+        for(EdFace *f:{&grate->c[0].f[4],&grate->c[backCell].f[backFace]}){
+            CHECK(f->material==7&&f->attributes.geometryMode==4&&(f->attributes.surfaceFlags&2)&&!(f->attributes.surfaceFlags&4));
+            CHECK((f->attributes.adjoinFlags&7)==5);
+            // The stock COG opens the passage solely by setting adjoin bit 2.
+            f->attributes.adjoinFlags|=2;CHECK((f->attributes.adjoinFlags&7)==7);
+        }
+        CHECK(edGenerateSlashGrate(grate.get(),hit,7,script)&&grate->cogCount==1);
+        uint32_t size=0;unsigned char *wire=edWireEncode(grate.get(),&size);CHECK(wire&&edWireDecode(before.get(),wire,size)&&edModelsEqual(grate.get(),before.get()));edFree(wire);
+    }
     if(argc==3&&!strcmp(argv[1],"--spline-isolated")){
         FILE *f=fopen(argv[2],"rb");CHECK(f);fseek(f,0,SEEK_END);long n=ftell(f);rewind(f);std::vector<unsigned char> bytes(n);CHECK(fread(bytes.data(),1,n,f)==n);fclose(f);
         auto loadedStorage=std::make_unique<EdModel>(),sourceStorage=std::make_unique<EdModel>(),resultStorage=std::make_unique<EdModel>();EdModel &loaded=*loadedStorage,&source=*sourceStorage,&result=*resultStorage;CHECK(edWireDecode(&loaded,bytes.data(),(uint32_t)n));edDefault(&source);source.groups=loaded.groups;source.groupCount=loaded.groupCount;
@@ -1722,6 +1925,65 @@ int main(int argc,char **argv) {
         for(int c=0;c<shaped->count;c++)for(int f=0;f<shaped->c[c].count;f++){const EdFace &p=shaped->c[c].f[f];if(p.neighbor<0)continue;const EdFace &other=shaped->c[p.neighbor].f[p.mirror];CHECK(other.neighbor==c&&other.mirror==f);}
         *unchanged=*portal;portal->c[0].splineId=1;auto protectedPortal=std::make_unique<EdModel>(*portal);
         CHECK(!edCleaveFacePlane(portal.get(),neighbor,mirror,edV(0,0,1),edV(0,0,.25))&&edModelsEqual(portal.get(),protectedPortal.get()));
+    }
+    {
+        auto portal=std::make_unique<EdModel>();edDefault(portal.get());portal->objectCount=2;
+        for(int i=0;i<2;i++){strcpy(portal->objects[i].templateName,"ghost");portal->objects[i].position=edV(i?.5:-.5,0,.5);}
+        auto before=std::make_unique<EdModel>(*portal);
+        CHECK(!edGenerateTeleporter(portal.get(),0,0,1)&&edModelsEqual(before.get(),portal.get()));
+        CHECK(edGenerateTeleporter(portal.get(),0,1,1)&&portal->cogCount==1&&edValidate(portal.get()));
+        CHECK(!strcmp(portal->cogs[0].file,"gs_teleport.cog"));
+        CHECK(atoi(portal->cogs[0].params[0].value)==portal->spawnCount&&atoi(portal->cogs[0].params[1].value)==portal->spawnCount+1);
+        auto generated=std::make_unique<EdModel>(*portal);CHECK(!edGenerateTeleporter(portal.get(),1,0,0)&&edModelsEqual(generated.get(),portal.get()));
+        unsigned size=0;unsigned char *data=edWireEncode(portal.get(),&size);CHECK(data&&edWireDecode(generated.get(),data,size)&&edModelsEqual(generated.get(),portal.get()));edFree(data);
+        *portal=*before;CHECK(edGenerateTeleporter(portal.get(),1,0,0)&&!strcmp(portal->cogs[0].params[2].value,"0"));
+        *portal=*before;portal->objects[1].position=portal->objects[0].position;*before=*portal;
+        CHECK(!edGenerateTeleporter(portal.get(),0,1,1)&&edModelsEqual(before.get(),portal.get()));
+    }
+    {
+        auto belt=std::make_unique<EdModel>();edDefault(belt.get());
+        EdPlacedCog script={};CHECK(edCogParseScript(&script,"00_conveyor.cog","symbols\nvector vec0\nfloat speed=2\nsurface convey0\nsurface convey1\nend\ncode\nend\n"));
+        EdSelection selected={};selected.count=2;selected.hits[0]={0,0,-1,-1};selected.hits[1]={0,4,-1,-1};
+        EdVec directions[]={edV(1,0,0),edV(0,0,1)};
+        CHECK(edGenerateConveyors(belt.get(),selected,directions,script,2)&&edValidate(belt.get())&&belt->cogCount==2);
+        for(int i=0;i<2;i++){CHECK(belt->cogs[i].params[2].cell==0&&belt->cogs[i].params[2].face==selected.hits[i].face);CHECK(belt->cogs[i].params[3].cell==-1);}
+        directions[0]=edV(0,-1,0);CHECK(edGenerateConveyors(belt.get(),selected,directions,script,4)&&belt->cogCount==2);
+        CHECK(!strcmp(belt->cogs[0].params[0].value,"(0/-1/0)")&&!strcmp(belt->cogs[0].params[1].value,"4"));
+        auto before=std::make_unique<EdModel>(*belt);directions[1]=edNormal(&belt->c[0].f[4]);
+        CHECK(!edGenerateConveyors(belt.get(),selected,directions,script,2)&&edModelsEqual(belt.get(),before.get()));
+        unsigned size=0;unsigned char *data=edWireEncode(belt.get(),&size);CHECK(data&&edWireDecode(before.get(),data,size)&&edModelsEqual(belt.get(),before.get()));edFree(data);
+    }
+    {
+        // Every door variant uses document-owned models, frames and COG links.
+        const EdVec axes[]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+        for(EdVec axis:axes)for(int split=0;split<2;split++)for(int mode=0;mode<4;mode++){
+            auto doorStorage=std::make_unique<EdModel>();EdModel &door=*doorStorage;edDefault(&door);CHECK(edExtrudeStep(&door,0,1));
+            if(mode==2){CHECK(edDoorSwitch(&door,0,4,edV(0,1,.5),0,64,64));CHECK(door.c[0].f[4].count==4&&door.c[0].f[4].customUV);}
+            CHECK(edGenerateDoor(&door,1,"test_door",split,axis,mode,2,0,4)&&edValidate(&door));
+            CHECK(door.objectCount==1+split&&door.templateCount==1+split&&door.cogCount==1);
+            CHECK(!strcmp(door.cogs[0].file,"gs_door.cog"));
+            if(split){
+                double lo=1e30,hi=-1e30;for(int f=0;f<door.c[1].count;f++)for(int v=0;v<door.c[1].f[f].count;v++){double p=edDot(door.c[1].f[f].v[v].p,axis);lo=fmin(lo,p);hi=fmax(hi,p);}
+                int seams=0;for(int mesh=0;mesh<door.meshCount;mesh++)for(int f=0;f<door.meshes[mesh].geometry.count;f++){
+                    const EdFace &face=door.meshes[mesh].geometry.f[f];bool seam=true;for(int v=0;v<face.count;v++)seam=seam&&fabs(edDot(face.v[v].p,axis)-(lo+hi)*.5)<ED_EPS*2;
+                    if(!seam)continue;seams++;EdFace expected=face;edMapFace(&expected);
+                    for(int v=0;v<face.count;v++){CHECK(fabs(face.v[v].u-expected.v[v].u)<1e-8);CHECK(fabs(face.v[v].v-expected.v[v].v)<1e-8);}
+                }CHECK(seams==2);
+            }
+            for(int i=0;i<door.objectCount;i++){
+                const auto &o=door.objects[i];CHECK(o.attributes.frameCount==2&&o.attributes.pathOverride);
+                EdVec delta=edSub(o.attributes.frames[1].position,o.position);
+                CHECK(edDot(delta,axis)*(i?-1:1)>0);
+                EdVec cross=edCross(delta,axis);CHECK(edDot(cross,cross)<1e-10);
+            }
+            for(int p=0;p<door.cogs[0].count;p++)if(!strcmp(door.cogs[0].params[p].name,"switch0")&&mode==2)CHECK(door.cogs[0].params[p].cell==0&&door.cogs[0].params[p].face==4);
+            unsigned size=0;unsigned char *bytes=edWireEncode(&door,&size);auto copyStorage=std::make_unique<EdModel>();EdModel &copy=*copyStorage;CHECK(bytes&&edWireDecode(&copy,bytes,size)&&edModelsEqual(&copy,&door));edFree(bytes);
+            CHECK(!edGenerateDoor(&door,1,"test_door",split,axis,mode,2,0,4)&&edModelsEqual(&copy,&door));
+        }
+        auto doorStorage=std::make_unique<EdModel>();EdModel &door=*doorStorage;edDefault(&door);auto beforeStorage=std::make_unique<EdModel>(door);EdModel &before=*beforeStorage;
+        CHECK(!edDoorSwitch(&door,0,4,edV(.99,1,.5),0,64,64)&&edModelsEqual(&before,&door));
+        CHECK(!edGenerateDoor(&door,0,"bad",0,edV(0,0,1),2,0)&&edModelsEqual(&before,&door));
+        door.c[0].splineId=1;before=door;CHECK(!edGenerateDoor(&door,0,"bad",0,edV(0,0,1),1,0)&&edModelsEqual(&before,&door));
     }
     {
         auto lift=std::make_unique<EdModel>();edDefault(lift.get());

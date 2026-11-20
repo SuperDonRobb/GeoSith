@@ -5,7 +5,7 @@
 #include <stdint.h>
 /* Versioned, little-endian field encoding. Only populated records go on wire;
    no compiler padding, pointers, unused cells or native struct layout. */
-#define ED_WIRE_VERSION 26u
+#define ED_WIRE_VERSION 28u
 typedef struct {unsigned char *bytes;size_t size,at;int read,ok,legacyUV;} EdWire;
 static void edWireBytes(EdWire *w,void *value,size_t size){if(!w->ok||w->at>w->size||size>w->size-w->at){w->ok=0;return;}if(w->read)edCopy(value,w->bytes+w->at,size);else if(w->bytes)edCopy(w->bytes+w->at,value,size);w->at+=size;}
 static void edWireText(EdWire *w,void *value,size_t size,size_t stride=0){edWireBytes(w,value,size);if(!stride)stride=size;if(w->read&&w->ok&&stride)for(size_t i=stride;i<=size;i+=stride)((char*)value)[i-1]=0;}
@@ -181,6 +181,9 @@ static void edWireModel(EdWire *w,EdModel *m){
     edWireGroups(w,m);
     for(int i=0;w->ok&&i<m->splineCount;i++){edWireCount(w,&m->splines[i].groupId,m->groupCount);edWireSplineState(w,&m->splines[i]);edWireNumber(w,&m->splines[i].sectorFlags,4);edWireNumber(w,&m->splines[i].sectorFlagsMask,4);edWireNumber(w,&m->splines[i].hasSectorTint,4);edWireVec(w,&m->splines[i].sectorTint);}
     edWireBaked(w,m);
+    // Older documents have no wind extension; their splines default to off.
+    if(!w->read||w->at<w->size)for(int i=0;w->ok&&i<m->splineCount;i++)edWireNumber(w,&m->splines[i].windSpeed,8);
+    if(!w->read||w->at<w->size)for(int i=0;w->ok&&i<m->splineCount;i++){edWireNumber(w,&m->splines[i].surfaceFlags,4);edWireNumber(w,&m->splines[i].surfaceFlagsMask,4);}
 }
 static unsigned char *edWireEncode(const EdModel *model,uint32_t *size){
     EdWire measure={NULL,ED_NET_LIMIT/2,0,0,1};edWireModel(&measure,(EdModel*)model);if(!measure.ok)return NULL;

@@ -1098,6 +1098,34 @@ rdSurface* sithSurface_SurfaceLightAnim(SithSurface *surface, flex_t a2, flex_t 
     return result;
 }
 
+/* Convert world velocity through the actual affine texture mapping. A single
+ * edge cannot distinguish mirrored UVs or unequal U/V scales. */
+static int sithSurface_TextureVelocity(const SithSurface *surface, const rdVector3 *velocity, rdVector2 *scroll)
+{
+    const rdFace *face=&surface->surfaceInfo.face;
+    SithWorld *world=sithWorld_g_pCurrentWorld;
+    if(!world||face->numVertices<3||!face->vertexPosIdx||!face->vertexUVIdx)return 0;
+    for(unsigned int i=0;i<face->numVertices;i++)
+        if(face->vertexPosIdx[i]<0||face->vertexPosIdx[i]>=world->numVertices||face->vertexUVIdx[i]<0||face->vertexUVIdx[i]>=world->numTexVertices)return 0;
+    rdVector3 origin=world->aVertices[face->vertexPosIdx[0]];
+    double best=0,du=0,dv=0;
+    rdVector2 uv=world->aTexVerticies[face->vertexUVIdx[0]];
+    for(unsigned int i=1;i<face->numVertices;i++)for(unsigned int j=i+1;j<face->numVertices;j++){
+        rdVector3 a,b;rdVector_Sub3(&a,&world->aVertices[face->vertexPosIdx[i]],&origin);rdVector_Sub3(&b,&world->aVertices[face->vertexPosIdx[j]],&origin);
+        double aa=(double)a.x*a.x+(double)a.y*a.y+(double)a.z*a.z;
+        double ab=(double)a.x*b.x+(double)a.y*b.y+(double)a.z*b.z;
+        double bb=(double)b.x*b.x+(double)b.y*b.y+(double)b.z*b.z,det=aa*bb-ab*ab;
+        if(det<=best||det<=aa*bb*1e-10)continue;
+        double av=(double)a.x*velocity->x+(double)a.y*velocity->y+(double)a.z*velocity->z;
+        double bv=(double)b.x*velocity->x+(double)b.y*velocity->y+(double)b.z*velocity->z;
+        double x=(av*bb-bv*ab)/det,y=(bv*aa-av*ab)/det;
+        rdVector2 u=world->aTexVerticies[face->vertexUVIdx[i]],v=world->aTexVerticies[face->vertexUVIdx[j]];
+        du=x*(u.x-uv.x)+y*(v.x-uv.x);dv=x*(u.y-uv.y)+y*(v.y-uv.y);best=det;
+    }
+    if(best<=0||!isfinite(du)||!isfinite(dv))return 0;
+    scroll->x=-du;scroll->y=-dv;return 1;
+}
+
 rdSurface* sithSurface_SlideWall(SithSurface *surface, rdVector3 *a2)
 {
     rdMaterial *v2; // eax
@@ -1157,6 +1185,10 @@ rdSurface* sithSurface_SlideWall(SithSurface *surface, rdVector3 *a2)
     v3->sithSurfaceParent = surface;
     v6 = sithWorld_g_pCurrentWorld;
     v3->field_24 = *a2;
+    if(sithSurface_TextureVelocity(surface,a2,&v3->scrollVector)){
+        surface->flags |= SITH_SURFACE_SCROLLING;
+        return v3;
+    }
     v7 = 1;
     v8 = surface->surfaceInfo.face.normal.x;
     v34 = surface->flags;

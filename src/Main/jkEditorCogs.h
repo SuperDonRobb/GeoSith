@@ -1,4 +1,9 @@
+#include "edHazardScript.h"
+#include "edTeleporterScript.h"
+#include "edWindScript.h"
+#include "edDoorScript.h"
 #include "edDestructibleScript.h"
+#include "edWaterThrustScript.h"
 /* Placed COG authoring owns a draft across the temporary world-picking mode. */
 #define EDITOR_COG_SOURCES 2048
 typedef struct {char file[32],archive[260];unsigned int offset,size;} EditorCogSource;
@@ -41,7 +46,7 @@ static void discoverCogs(void){
     for(int d=0;d<5;d++){char path[300];snprintf(path,sizeof(path),"%s%scog",jkRes_gCtx.aGobDirectories[d].name,jkRes_gCtx.aGobDirectories[d].name[0]?"/":"");stdFileSearch *search=stdFileUtil_NewFind(path,3,"cog");stdFileSearchResult entry;if(search){while(stdFileUtil_FindNext(search,&entry))if(!entry.is_subdirectory)addCogSource(entry.fpath,NULL,0,0);stdFileUtil_DisposeFind(search);}}
     qsort(cogSources,cogSourceCount,sizeof(cogSources[0]),cogSourceCompare);
 }
-static char *cogSourceText(const char *name){if(!__strcmpi(name,"gs_destructible.cog")){char *copy=edAlloc(sizeof(edDestructibleScript));if(copy)memcpy(copy,edDestructibleScript,sizeof(edDestructibleScript));return copy;}auto custom=customResources.files.find(EdResources::path(std::string("cog/")+name));if(custom!=customResources.files.end()){char *copy=edAlloc(custom->second->size()+1);if(copy){memcpy(copy,custom->second->data(),custom->second->size());copy[custom->second->size()]=0;}return copy;}char *networkSource=netCogSource(name);if(networkSource)return networkSource;char path[80];snprintf(path,sizeof(path),"cog\\%s",name);stdFile_t file=jkRes_FileOpen(path,"rb");char *text=NULL;
+static char *cogSourceText(const char *name){if(!__strcmpi(name,"gs_hazard.cog")){char *copy=edAlloc(sizeof(edHazardScript));if(copy)memcpy(copy,edHazardScript,sizeof(edHazardScript));return copy;}if(!__strcmpi(name,"gs_wind.cog")){char *copy=edAlloc(sizeof(edWindScript));if(copy)memcpy(copy,edWindScript,sizeof(edWindScript));return copy;}if(!__strcmpi(name,"gs_teleport.cog")){char *copy=edAlloc(sizeof(edTeleporterScript));if(copy)memcpy(copy,edTeleporterScript,sizeof(edTeleporterScript));return copy;}if(!__strcmpi(name,"gs_door.cog")){char *copy=edAlloc(sizeof(edDoorScript));if(copy)memcpy(copy,edDoorScript,sizeof(edDoorScript));return copy;}if(!__strcmpi(name,"gs_waterthrust.cog")){char *copy=edAlloc(sizeof(edWaterThrustScript));if(copy)memcpy(copy,edWaterThrustScript,sizeof(edWaterThrustScript));return copy;}if(!__strcmpi(name,"gs_destructible.cog")){char *copy=edAlloc(sizeof(edDestructibleScript));if(copy)memcpy(copy,edDestructibleScript,sizeof(edDestructibleScript));return copy;}auto custom=customResources.files.find(EdResources::path(std::string("cog/")+name));if(custom!=customResources.files.end()){char *copy=edAlloc(custom->second->size()+1);if(copy){memcpy(copy,custom->second->data(),custom->second->size());copy[custom->second->size()]=0;}return copy;}char *networkSource=netCogSource(name);if(networkSource)return networkSource;char path[80];snprintf(path,sizeof(path),"cog\\%s",name);stdFile_t file=jkRes_FileOpen(path,"rb");char *text=NULL;
     if(file){int size=jkRes_FileSize(file);if(size>0&&size<2*1024*1024){text=edAlloc(size+1);if(text){if(jkRes_FileRead(file,text,size)==size)text[size]=0;else{edFree(text);text=NULL;}}}jkRes_FileClose(file);if(text)return text;}
     discoverCogs();for(int i=0;i<cogSourceCount;i++){EditorCogSource *s=&cogSources[i];if(__strcmpi(s->file,name)||!s->archive[0]||!s->size||s->size>2*1024*1024)continue;FILE *f=fopen(s->archive,"rb");if(!f)continue;text=edAlloc(s->size+1);if(text){if(!fseek(f,s->offset,SEEK_SET)&&fread(text,1,s->size,f)==s->size)text[s->size]=0;else{edFree(text);text=NULL;}}fclose(f);if(text)return text;}return NULL;
 }
@@ -72,7 +77,7 @@ static int readPlacedCogs(EdModel *m,const char *text){
     ownedCogCount=m->cogCount;for(int i=0;i<ownedCogCount;i++)ownedCogSlots[i]=i;return 1;
 }
 static int cogPicking(void){return cogDraft&&cogPickParam>=0;}
-int jkEditor_HandleEscape(void){if(active&&terrainSessionOpen()){terrainSessionFinish();return 1;}if(active&&builderAsset>=0){if(builderInverting){builderInverting=0;say("Mesh invert cancelled.");return 1;}builderExitRequested=1;return 1;}if(active&&mapActive){int editing=splineDrawing||splineDragging||mapCleaveMode||mapDrawing||mapUnplaced||mapDragging||mapBox;if(editing)mapEscape();return editing?1:0;}if(active&&cogPicking()){cogPickCancelled=1;return 1;}return 0;}
+int jkEditor_HandleEscape(void){if(active&&spiralCancel())return 1;if(active&&bevelCancel())return 1;if(active&&windCancel())return 1;if(active&&conveyorCancel())return 1;if(active&&doorCancel())return 1;if(active&&waterSimFinish())return 1;if(active&&presetEscape())return 1;if(active&&terrainSessionOpen()){terrainSessionFinish();return 1;}if(active&&builderAsset>=0){if(builderInverting){builderInverting=0;say("Mesh invert cancelled.");return 1;}builderExitRequested=1;return 1;}if(active&&mapActive){int editing=splineDrawing||splineDragging||mapCleaveMode||mapDrawing||mapUnplaced||mapDragging||mapBox;if(editing)mapEscape();return editing?1:0;}if(active&&cogPicking()){cogPickCancelled=1;return 1;}return 0;}
 static EdCogParam *pickingCogParam(void){return cogPicking()&&cogSelected<cogDraft->count&&cogPickParam<cogDraft->cogs[cogSelected].count?&cogDraft->cogs[cogSelected].params[cogPickParam]:NULL;}
 static void updateCogPick(EdVec origin,EdVec direction){EdCogParam *param=pickingCogParam();cogPickThing=-10000;cogPickHit.cell=-1;if(!param)return;
     if(param->type==ED_COG_SURFACE||param->type==ED_COG_SECTOR)edRaySelection(model,origin,direction,&cogPickHit);else edRayMaterial(model,origin,direction,&cogPickHit);
@@ -228,6 +233,30 @@ static void suspendPlacedCogs(int geometry){SithWorld *w=sithWorld_g_pCurrentWor
     for(int i=0;i<sithCog_numThingLinks;)if(ownsCog(sithCog_aThingLinks[i].cog)){sithCog_aThingLinks[i]=sithCog_aThingLinks[--sithCog_numThingLinks];}else i++;
     for(int i=0;i<w->numThingsLoaded;i++)if(ownsCog(w->aThings[i].pCaptureCog))w->aThings[i].pCaptureCog=NULL;
 }
+// Play-mode grate COGs change live surfaces, not the editor document. Restore
+// just those surfaces without rebuilding the world or adding an undo entry.
+static void resetSlashGrates(void){
+    SithWorld *w=sithWorld_g_pCurrentWorld;if(!w||!model)return;
+    std::set<std::pair<int,int>> faces;
+    for(int i=0;i<model->cogCount;i++)if(!__strcmpi(model->cogs[i].file,"00_slashgrate.cog")){
+        const EdPlacedCog &cog=model->cogs[i];
+        for(int j=0;j<cog.count;j++){
+            const EdCogParam &p=cog.params[j];
+            if(p.type!=ED_COG_SURFACE||(__strcmpi(p.name,"grate")&&__strcmpi(p.name,"grateback"))||p.cell<0||p.cell>=model->count||p.face<0||p.face>=model->c[p.cell].count)continue;
+            faces.emplace(p.cell,p.face);
+            const EdFace &face=model->c[p.cell].f[p.face];
+            if(face.neighbor>=0&&face.neighbor<model->count&&face.mirror>=0&&face.mirror<model->c[face.neighbor].count)faces.emplace(face.neighbor,face.mirror);
+        }
+    }
+    for(auto [cell,face]:faces){
+        if(cell>=w->numSectors||face>=w->aSectors[cell].numSurfaces)continue;
+        SithSurface *surface=&w->aSectors[cell].surfaces[face];
+        if(!surface->pAdjoin)continue;
+        surface->surfaceInfo.face.wallCel=0;
+        surface->pAdjoin->flags=edSurfaceAttributes(&model->c[cell].f[face]).adjoinFlags;
+        if(sithNet_isMulti&&sithNet_isServer)sithSurface_SyncSurface(surface);
+    }
+}
 static void clearCogInstance(sithCog *c){if(c->pSymbolTable)sithCogParse_FreeSymbolTable(c->pSymbolTable);if(c->heap)SITH_FREE(c->heap);
 #ifdef COG_HEAP_INIT_ARGS
     if(c->aInitArgs)SITH_FREE(c->aInitArgs);
@@ -379,6 +408,86 @@ static int stressCogs(SithThing *p){static int step;
 
 static int stressDestructible(SithThing *player){
     static int frame;stressRunning=1;active=1;tool=1;if(frame++<5)return 1;
+    if(getenv("GEOSITH_SPIRAL_TEST")){int result=spiralTest();if(!result)return 1;fflush(stdout);sithSound_Shutdown();exit(result>0?0:2);}
+    if(getenv("GEOSITH_BEVEL_TEST")){int result=bevelTest();if(!result)return 1;fflush(stdout);sithSound_Shutdown();exit(result>0?0:2);}
+    if(getenv("GEOSITH_HAZARD_TEST")){
+        EdBuffer<unsigned char> selected;selected[0]=1;edCopyModel(candidate,model);
+        if(!edGenerateHazard(candidate,selected,0,2)||!commit())exit(2);
+        if(!writeEditorGob(model,"Episode/sithed_hazard_test.gob","Hazard test",0))exit(2);
+        leaveEditor(player);auto *world=sithWorld_g_pCurrentWorld;if(ownedCogCount!=1)exit(2);
+        auto *c=&world->aCogs[ownedCogSlots[0]];if(!c->pScript||!(c->flags&SITH_COG_PULSE_SET))exit(2);
+        player->actorParams.health=100;sithInventory_SetInventory(player,60,0);player->actorParams.flags&=~SITH_AF_INVULNERABLE;int before=0;for(int i=0;i<=world->numThings;i++)before+=world->aThings[i].type!=0;
+        sithCog_SendMessage(c,SITH_MESSAGE_PULSE,0,0,0,0,0);
+        int after=0;for(int i=0;i<=world->numThings;i++)after+=world->aThings[i].type!=0;
+        printf("GEOSITH_HAZARD health %.3f things %d -> %d\n",player->actorParams.health,before,after);
+        int ok=player->actorParams.health<100&&after>before;
+        puts(ok?"GEOSITH_HAZARD PASS: live damage, lightning effect and saved script":"GEOSITH_HAZARD FAIL");fflush(stdout);sithSound_Shutdown();exit(ok?0:2);
+    }
+    if(getenv("GEOSITH_WIND_TEST")){int ok=windTest(player);fflush(stdout);sithSound_Shutdown();exit(ok?0:2);}
+    if(getenv("GEOSITH_TELEPORTER_TEST")){
+        edCopyModel(candidate,model);candidate->objectCount=2;
+        for(int i=0;i<2;i++){auto &o=candidate->objects[i];o={};strcpy(o.templateName,"ghost");o.position=edV(i?.5:-.5,0,.5);o.rotation=edV(0,i?90:0,0);}
+        if(!commit())exit(2);clearHistory();thingGeneratorSelect(0);thingGeneratorSelect(1);thingGeneratorMenu();
+        if(model->cogCount!=1||thingGeneratorHasSelection()||!historyStep(0)||model->cogCount||!historyStep(1)||model->cogCount!=1)exit(2);
+        if(!writeEditorGob(model,"Episode/sithed_teleporter_test.gob","Teleporter test",0))exit(2);
+        leaveEditor(player);auto *w=sithWorld_g_pCurrentWorld;auto *c=&w->aCogs[ownedCogSlots[0]];
+        player->position=w->aThings[objectThings[0]].position;
+        auto *sparks=sithTemplate_GetTemplate("+telesparks");if(!sparks)exit(2);
+        auto particleCount=[&](){int count=0;for(int i=0;i<=w->numThings;i++)if(w->aThings[i].type&&w->aThings[i].pTemplate==sparks)count++;return count;};
+        int before=particleCount();
+        auto pulse=[&](){sithCog_SendMessage(c,SITH_MESSAGE_PULSE,0,0,0,0,0);};pulse();
+        if(particleCount()!=before+2)exit(2);
+        if(fabs(player->position.x-.5)>.001)exit(2);pulse();if(fabs(player->position.x-.5)>.001)exit(2);
+        player->position={0,.75,.5};pulse();player->position=w->aThings[objectThings[1]].position;pulse();
+        if(fabs(player->position.x+.5)>.001)exit(2);
+        if(particleCount()!=before+4)exit(2);
+        puts("GEOSITH_TELEPORTER PASS: ordered thing selection, menus, undo/redo, save, COG compilation, both directions, endpoint particles and bounce protection");fflush(stdout);sithSound_Shutdown();exit(0);
+    }
+    if(getenv("GEOSITH_CONVEYOR_TEST")){
+        // Different handedness, rotations and scales must still visibly move
+        // along the same world velocity, without remapping either texture.
+        edCopyModel(candidate,model);
+        for(int i=0;i<2;i++){auto &f=candidate->c[0].f[i?4:0];f.customUV=1;
+            for(int v=0;v<f.count;v++){auto &p=f.v[v];p.u=i?-160*p.p.x+64*p.p.z:320*p.p.x+80*p.p.y;p.v=i?320*p.p.x+320*p.p.z:-160*p.p.x+320*p.p.y;}}
+        if(!commit())exit(2);
+        clearHistory();picks.count=2;picks.hits[0]={0,0,-1,-1};picks.hits[1]={0,4,-1,-1};mapOpen(player);surfaceAttributesDialog();
+        if(!conveyorActive()||mapActive||model->cogCount||!conveyorCancel()||undoCount)exit(2);
+        surfaceAttributesDialog();if(!conveyorActive())exit(2);
+        EdVec point;if(!conveyorAim(0,edV(0,0,.5),edV(0,0,-1),&point)||fabs(point.z-.003)>1e-5)exit(2);
+        conveyorDirections[0]=edV(-1,0,0);
+        if(!conveyorApply()||model->cogCount!=2||!historyStep(0)||model->cogCount||!historyStep(1)||model->cogCount!=2)exit(2);
+        if(!writeEditorGob(model,"Episode/sithed_conveyor_test.gob","Conveyor test",0))exit(2);
+        leaveEditor(player);SithWorld *world=sithWorld_g_pCurrentWorld;
+        for(int i=0;i<2;i++){SithSurface *surface=&world->aSectors[0].surfaces[i?4:0];rdSurface *anim=sithSurface_GetRdSurface(surface);
+            if(!anim||!(surface->flags&SITH_SURFACE_SCROLLING)||fabs(anim->field_24.x+.2)>.0001||fabs(anim->field_24.y)>.0001||fabs(anim->field_24.z)>.0001)exit(2);
+            if(fabs(anim->scrollVector.x-(i?-32:64))>.001||fabs(anim->scrollVector.y-(i?64:-32))>.001)exit(2);}
+        puts("GEOSITH_CONVEYOR PASS: menus, shared world direction, rotated/mirrored/scaled UV scrolling, undo/redo, save and stock COG velocity");fflush(stdout);sithSound_Shutdown();exit(0);
+    }
+    if(const char *modeText=getenv("GEOSITH_DOOR_TEST")){
+        int mode=atoi(modeText);edCopyModel(candidate,model);
+        if(!edExtrudeStep(candidate,0,1))exit(2);
+        if(!commit())exit(2);clearHistory();sectorPicks.clear();sectorPicks[1]=1;
+        if(mode==2)mapOpen(player);
+        sectorAttributesDialog();
+        if(mode==2){
+            if(!doorActive()||mapActive||model->objectCount)exit(2);
+            if(!doorCancel()||model->objectCount||undoCount)exit(2);
+            sectorPicks[1]=1;sectorAttributesDialog();
+            EdHit hit={};hit.cell=0;hit.face=4;hit.point=edV(0,1,.5);
+            doorPreview(edV(0,0,.5),edV(0,1,0));doorPlace(hit);if(doorActive())exit(2);
+        }
+        if(model->objectCount!=2||!historyStep(0)||model->objectCount||!historyStep(1)||model->objectCount!=2)exit(2);
+        if(!writeEditorGob(model,"Episode/sithed_door_test.gob","Door test",0))exit(2);
+        leaveEditor(player);SithWorld *world=sithWorld_g_pCurrentWorld;
+        SithThing *door=&world->aThings[objectThings[0]],*other=&world->aThings[objectThings[1]];
+        if(door->moveType!=SITH_MT_PATH||door->trackParams.loadedFrames!=2||!door->pSoundClass)exit(2);
+        if(mode==3){sithInventory_SetInventory(player,46,0);sithCog_ThingSendMessage(door,player,SITH_MESSAGE_ACTIVATE);if(door->trackParams.flags)exit(2);sithInventory_SetInventory(player,46,1);}
+        if(mode==2){sithCog_ThingSendMessage(door,player,SITH_MESSAGE_ACTIVATE);if(door->trackParams.flags)exit(2);sithCog_SurfaceSendMessage(&world->aSectors[0].surfaces[4],player,SITH_MESSAGE_ACTIVATE);}
+        else if(mode==0){player->position=door->position;sithCog_SendMessage(&world->aCogs[ownedCogSlots[0]],SITH_MESSAGE_PULSE,0,0,0,0,0);}
+        else sithCog_ThingSendMessage(door,player,SITH_MESSAGE_ACTIVATE);
+        if(door->goalframe!=1||other->goalframe!=1||!door->trackParams.flags||!other->trackParams.flags){printf("DOOR FAIL trigger mode %d\n",mode);fflush(stdout);exit(2);}
+        printf("GEOSITH_DOOR PASS: activation %d, menus, split panels, movement/sound, undo/redo, COG compilation and GOB packaging\n",mode);fflush(stdout);sithSound_Shutdown();exit(0);
+    }
     if(getenv("GEOSITH_LIFT_TEST")){
         // Exercise the actual bound camera key in both directions while editing.
         stdControlKeyInfo *cameraBinding=&sithControl_aInputFuncToKeyinfo[INPUT_FUNC_CAMERAMODE];if(!cameraBinding->numEntries)exit(2);
