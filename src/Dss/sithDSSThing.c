@@ -274,8 +274,9 @@ int sithDSSThing_ProcessStateUpdate(SithMessage *pMsg)
             pThing->weaponParams.flags = NETMSG_POPS32();
             break;
         case SITH_THING_ITEM:
-            pThing->itemParams.flags = NETMSG_POPS32();
-            if (pThing->itemParams.flags & SITH_ITEM_BACKPACK)
+        {
+            const uint32_t itemFlags = NETMSG_POPS32();
+            if (itemFlags & SITH_ITEM_BACKPACK)
             {
                 // Added: bounds checking
                 int numBins = NETMSG_POPS16();
@@ -288,7 +289,9 @@ int sithDSSThing_ProcessStateUpdate(SithMessage *pMsg)
                     pThing->itemParams.contents[i].value = NETMSG_POPF32();
                 }
             }
+            pThing->itemParams.flags = itemFlags;
             break;
+        }
         default:
             break;
     }
@@ -1425,7 +1428,10 @@ void sithDSSThing_Take(SithThing *pItem, SithThing *pThing, int outstream)
         return;
     }
     pActor2 = sithThing_GetGuidThing(sithComm_netMsgTmp.pktData[1]);
-    if ( pItemThing2 && pActor2 )
+    // MotS pickup COGs use TakeItem(item, -1) and apply their local effects
+    // themselves. The host must still acknowledge the take and start respawn,
+    // just as ProcessTake does for this sentinel on the receive path.
+    if ( pItemThing2 && (pActor2 || (Main_bMotsCompat && actorId == -1)) )
     {
         if ( sithComm_netMsgTmp.netMsg.cogMsgId != DSS_TAKEITEM1 )
         {

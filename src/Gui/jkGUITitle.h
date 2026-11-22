@@ -2,6 +2,7 @@
 #define _JKGUITITLE_H
 
 #include "types.h"
+#include "Main/jkMain.h"
 extern int jkGuiTitle_bSkipLoadingWait;
 
 #define jkGuiTitle_Startup_ADDR (0x00418960)

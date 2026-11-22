@@ -6,6 +6,8 @@
 #include "General/stdFont.h"
 #include "General/stdStrTable.h"
 #include "General/stdFileUtil.h"
+// Added: File existence check for Debug Play cutscenes.
+#include "General/util.h"
 #include "Engine/rdMaterial.h" // TODO move tVBuffer
 #include "stdPlatform.h"
 #include "jk.h"
@@ -20,8 +22,20 @@
 #include "Main/jkMain.h"
 #include "Main/jk.h"
 #include "Win95/Windows.h"
+#include "Platform/wuRegistry.h"  // Added: Persistent Debug Play checkbox preferences.
 #include "Primitives/rdVector.h"
 #include "General/stdString.h"
+
+// Added: Remember the Show Cutscenes checkbox state during this session.
+static int jkGuiSingleplayer_bShowCutscenes = 0;
+
+// Added: Callback for toggling cinematic entries in the debug level list.
+static int jkGuiSingleplayer_ShowCutscenesClicked(
+    jkGuiElement* pElement,
+    jkGuiMenu* pMenu,
+    int32_t mouseX,
+    int32_t mouseY,
+    int redraw);
 
 static int32_t jkGuiSingleplayer_unk_52B170[2] = {0xd, 0xe};
 
@@ -54,7 +68,7 @@ static jkGuiElement jkGuiSingleplayer_buttons2[11] = {
 
 static jkGuiMenu jkGuiSingleplayer_menu2 = {jkGuiSingleplayer_buttons2, 0, 0xFFFF, 0xFFFF, 0xF, 0, 0, jkGui_stdBitmaps, jkGui_stdFonts, 0, 0, "thermloop01.wav", "thrmlpu2.wav", 0, 0, 0, 0, 0, 0};
 
-static jkGuiElement jkGuiSingleplayer_buttons3[11] = {
+static jkGuiElement jkGuiSingleplayer_buttons3[12] = {
     { ELEMENT_TEXT,        0,               0,  NULL,               3, {0,  410,  640, 20},  1,  0,  0,  0,  0,  0, {0},  0},
     { ELEMENT_TEXT,        0,               6, "GUI_SINGLEPLAYER",  3, {190, 40,  440, 40},  1,  0,  0,  0,  0,  0, {0},  0},
     { ELEMENT_TEXTBUTTON,  JKGUI_NEWGAME,   2, "GUI_NEWGAME",       3, {190, 90,  210, 40},  1,  0,  0,  0,  0,  0, {0},  0},
@@ -65,11 +79,82 @@ static jkGuiElement jkGuiSingleplayer_buttons3[11] = {
     { ELEMENT_TEXTBUTTON,  1,               2, "GUI_OK",            3, {400, 430, 200, 40},  1,  0,  0,  0,  0,  0, {0},  0},
     { ELEMENT_TEXTBUTTON, -1,               2, "GUI_CANCEL",        3, {200, 430, 200, 40},  1,  0,  0,  0,  0,  0, {0},  0},
     { ELEMENT_TEXTBUTTON, JKEDITOR_CREATE, 2, NULL, 3, {20, 250, 220, 40}, 1, 0, 0, 0, 0, 0, {0}, 0},
-    { ELEMENT_END,         0,               0,  NULL,               0, {0},                  0,  0,  0,  0,  0,  0, {0},  0}
+    // Added: Toggle cinematic entries in the debug level list.
+    { ELEMENT_CHECKBOX, 0, 0, "GUIEXT_SHOW_CUTSCENES", 0,{ 250, 390, 320, 20 }, 1, 0, NULL, NULL, &jkGuiSingleplayer_ShowCutscenesClicked, NULL,{ 0 }, 0 },
+    { ELEMENT_END, 0, 0, NULL, 0,{ 0 }, 0, 0, 0, 0, 0, 0,{ 0 }, 0 }
 };
 
 static jkGuiMenu jkGuiSingleplayer_menu3 = {jkGuiSingleplayer_buttons3, 0, 0xFFFF, 0xFFFF, 0xF, 0, 0, jkGui_stdBitmaps, jkGui_stdFonts, 0, 0, "thermloop01.wav", "thrmlpu2.wav", 0, 0, 0, 0, 0, 0};
 
+// Added: Preserve the selected episode for returning after debug video playback.
+static char jkGuiSingleplayer_debugReturnEpisode[128] = { 0 };
+static int jkGuiSingleplayer_bDebugReturnPending = 0;
+// Added: Active debug-level list, used when toggling Show Cutscenes.
+static Darray* jkGuiSingleplayer_pDebugLevelArray = NULL;
+// Added: Free the filename buffers stored in the debug level list.
+static void jkGuiSingleplayer_FreeDebugLevelIds(Darray* array)
+{
+    if (!array)
+        return;
+
+    for (int i = 0; i < (int)array->total; i++)
+    {
+        jkGuiStringEntry* entry = jkGuiRend_GetStringEntry(array, i);
+
+        if (entry && entry->id)
+        {
+            JK_FREE((void*)entry->id);
+            entry->id = 0;
+        }
+    }
+}
+// Added: Rebuild the debug level list when Show Cutscenes is toggled.
+static int jkGuiSingleplayer_ShowCutscenesClicked(
+    jkGuiElement* pElement,
+    jkGuiMenu* pMenu,
+    int32_t mouseX,
+    int32_t mouseY,
+    int redraw)
+{
+    Darray* array = jkGuiSingleplayer_pDebugLevelArray;
+
+    if (!array)
+        return 0;
+
+    // Added: Toggle the checkbox state explicitly.
+    pElement->selectedTextEntry = !pElement->selectedTextEntry;
+
+    // Added: Remember the Show Cutscenes checkbox state.
+    jkGuiSingleplayer_bShowCutscenes = pElement->selectedTextEntry;
+
+    // Added: Save the Show Cutscenes preference across game restarts.
+    wuRegistry_SaveBool(
+        "DebugPlayShowCutscenes",
+        jkGuiSingleplayer_bShowCutscenes
+    );
+
+    // Added: Rebuild the list using the current checkbox state.
+    jkGuiSingleplayer_sub_41AA30(
+        array,
+        &jkGuiSingleplayer_buttons3[6],
+        0,
+        jkRes_episodeGobName,
+        jkGui_episodeLoad.type,
+        jkGui_episodeLoad.numSeq,
+        jkGui_episodeLoad.currentEpisodeEntryIdx,
+        jkGui_episodeLoad.paEntries
+    );
+
+    // Added: Redraw the checkbox and updated list.
+    if (pMenu)
+    {
+        jkGuiRend_UpdateAndDrawClickable(pElement, pMenu, 1);
+        jkGuiRend_UpdateAndDrawClickable(&jkGuiSingleplayer_buttons3[6], pMenu, 1);
+        jkGuiRend_Paint(pMenu);
+    }
+
+    return 0;
+}
 void jkGuiSingleplayer_Startup()
 {
     jkGui_InitMenu(&jkGuiSingleplayer_menu1, jkGui_stdBitmaps[JKGUI_BM_BK_SINGLE]);
@@ -97,6 +182,26 @@ void jkGuiSingleplayer_Shutdown()
         JK_FREE(jkGui_episodeLoad.paEntries);
         jkGui_episodeLoad.paEntries = 0;
     }
+}
+
+// Added: Save the episode used to launch a debug cutscene.
+void jkGuiSingleplayer_SetDebugReturnEpisode(const char* episode)
+{
+    if (!episode)
+        return;
+
+    stdString_SafeStrCopy(
+        jkGuiSingleplayer_debugReturnEpisode,
+        episode,
+        sizeof(jkGuiSingleplayer_debugReturnEpisode)
+    );
+}
+
+// Added: Request reopening the saved Debug Play episode.
+void jkGuiSingleplayer_RequestDebugReturn(void)
+{
+    if (jkGuiSingleplayer_debugReturnEpisode[0])
+        jkGuiSingleplayer_bDebugReturnPending = 1;
 }
 
 int jkGuiSingleplayer_Show()
@@ -224,10 +329,23 @@ int jkGuiSingleplayer_Show()
                         {
                             jkGui_sub_412E20(&jkGuiSingleplayer_menu3, JKGUI_NEWGAME, JKGUI_DEBUGPLAY, JKGUI_DEBUGPLAY);
                             jkGuiRend_DarrayNewStr(&array2, 10, 1);
+                            // Added: Make the active debug list available to the checkbox callback.
+                            jkGuiSingleplayer_pDebugLevelArray = &array2;
+
+                            // Added: Load the saved Show Cutscenes preference.
+                            jkGuiSingleplayer_bShowCutscenes =
+                                wuRegistry_GetBool("DebugPlayShowCutscenes", 0);
+
+                            // Added: Restore the saved Show Cutscenes preference.
+                            jkGuiSingleplayer_buttons3[10].selectedTextEntry =
+                                jkGuiSingleplayer_bShowCutscenes;
+
                             jkGuiSingleplayer_sub_41AA30(&array2, &jkGuiSingleplayer_buttons3[6], 0, jkRes_episodeGobName, jkGui_episodeLoad.type, jkGui_episodeLoad.numSeq, jkGui_episodeLoad.currentEpisodeEntryIdx, jkGui_episodeLoad.paEntries);
                             jkGuiRend_MenuSetReturnKeyShortcutElement(&jkGuiSingleplayer_menu3, &jkGuiSingleplayer_buttons3[7]);
                             jkGuiRend_MenuSetEscapeKeyShortcutElement(&jkGuiSingleplayer_menu3, &jkGuiSingleplayer_buttons3[8]);
                             clicked = jkGuiRend_DisplayAndReturnClicked(&jkGuiSingleplayer_menu3);
+                            // Added: The debug menu has closed; its array is no longer available to callbacks.
+                            jkGuiSingleplayer_pDebugLevelArray = NULL;
 
                             if (clicked == JKEDITOR_CREATE) {
                                 for (i=0;i<(int)array2.total;i++) { v11=jkGuiRend_GetStringEntry(&array2,i); if(v11->id) { JK_FREE((void*)v11->id); v11->id=0; } }
@@ -237,23 +355,59 @@ int jkGuiSingleplayer_Show()
                             if ( clicked == 1 )
                             {
                                 v9 = (const char *)jkGuiRend_GetId(&array2, jkGuiSingleplayer_buttons3[6].selectedTextEntry);
+                                if (!v9) clicked = -1;
+                                else {
                                 _strncpy(v25, v9+sizeof(int), 0x7Fu);
                                 v25[127] = 0;
                                 debug_episode_idx = *(int*)v9; // Added
-                            }
-                            for ( i = 0; i < (signed int)array2.total; ++i )
-                            {
-                                v11 = jkGuiRend_GetStringEntry(&array2, i);
-                                v13 = (void *)v11->id;
-                                if ( v13 )
-                                {
-                                    JK_FREE(v13);
-                                    v11->id = 0;
                                 }
                             }
+                            // Added: Release debug list filename buffers before freeing the array.
+                            jkGuiSingleplayer_FreeDebugLevelIds(&array2);
                             jkGuiRend_DarrayFree(&array2);
-                            if ( clicked == 1 ) {
-                                jkMain_sub_403470(v25);
+                            if (clicked == 1) {
+                                // Added: Launch SAN and SMK cutscenes through the existing video player.
+                                const char* pExt = strrchr(v25, '.');
+
+                                if (pExt && (!__strcmpi(pExt, ".san") || !__strcmpi(pExt, ".smk")))
+                                {
+                                    char videoPath[256];
+
+                                    snprintf(videoPath, sizeof(videoPath), "video\\%s", v25);
+
+                                    if (util_FileExists(videoPath))
+                                    {
+                                        // Added: Remember the episode before starting standalone video playback.
+                                        jkGuiSingleplayer_SetDebugReturnEpisode(a1);
+
+                                        // Added: Launch video as an episode cutscene.
+                                        jkMain_SwitchToDebugEpisodeVideo(videoPath);
+                                    }
+                                    else
+                                    {
+                                        stdPlatform_Printf("Debug Play: Cannot find cutscene '%s'\n", videoPath);
+                                    }
+                                }
+                                else
+                                {
+                                    // Added: Identify cinematic JKLs selected through Debug Play.
+                                    int bCinematicJkl = 0;
+
+                                    // List entries carry episode line numbers, not array indices.
+                                    for (int entry = 0; jkGui_episodeLoad.paEntries && entry < jkGui_episodeLoad.numSeq; ++entry) {
+                                        jkEpisodeEntry *pEntry = &jkGui_episodeLoad.paEntries[entry];
+                                        if (pEntry->lineNum == debug_episode_idx && !__strcmpi(pEntry->fileName, v25)) {
+                                            bCinematicJkl = pEntry->type == 1;
+                                            break;
+                                        }
+                                    }
+
+                                    // Added: Skip mission confirmation only for cinematic JKLs.
+                                    jkMain_bLoadingCinematicJkl = bCinematicJkl;
+
+                                    // Added: Preserve the existing JKL level-loading behavior.
+                                    jkMain_sub_403470(v25);
+                                }
 
 #ifdef QOL_IMPROVEMENTS
                                 // Added: progress end of level normally from debug menu, instead of exiting to main menu
@@ -290,6 +444,11 @@ int jkGuiSingleplayer_Show()
                                             break;
                                         }
                                     }
+                                }
+                                // Added: Prepare episode progression after a Debug Play cutscene.
+                                if (pExt && (!__strcmpi(pExt, ".san") || !__strcmpi(pExt, ".smk")))
+                                {
+                                    jkPlayer_bLoadingSomething = 1;
                                 }
 #endif
                                 //printf("pre %x %x %x\n", jkEpisode_mLoad.numSeq, jkEpisode_mLoad.type, jkEpisode_mLoad.currentEpisodeEntryIdx);
@@ -385,56 +544,148 @@ void jkGuiSingleplayer_sub_41AA30(Darray *array, jkGuiElement *element, int a3, 
         }
     }
     jkGuiRend_DarrayFreeEntry(array);
-    v22 = 0;
-    stdString_snprintf(tmp, 128, "episode\\%s\\jkl", episodeDir);
-    search = stdFileUtil_NewFind(tmp, 3, "JKL");
-    v13 = search;
-    if ( search )
+    // Added: Show LEVEL and CUT entries in episode.jk order when enabled.
+    if (jkGuiSingleplayer_buttons3[10].selectedTextEntry)
     {
-        while ( stdFileUtil_FindNext(search, &a2) )
+        if (a8 && a6 > 0)
         {
-            // Added: extended the path alloc to include the real index
-            uint32_t alloc_sz = _strlen(a2.fpath) + 1 + sizeof(int);
-            v14 = (char *)JK_ALLOC(alloc_sz);
-            _strncpy(v14+sizeof(int), a2.fpath, alloc_sz-sizeof(int)-1);
-            v14[alloc_sz-1] = 0;
-            v16 = jkGuiTitle_quicksave_related_func1(&strtable, v14+sizeof(int));
-            jkGuiRend_DarrayReallocStr(array, v16, (intptr_t)v14);
-
-            // Added
-            int* stash_idx = (int*)v14;
-            *stash_idx = 0;
-            ++v22;
-        }
-        stdFileUtil_DisposeFind(search);
-    }
-    
-    if ( (!v13 || !v22) && a6 > 0 )
-    {
-        v23 = a6;
-        v17 = a8;
-        do
-        {
-            if ( !v17->type )
+            for (int i = 0; i < a6; i++)
             {
-                // Added: extended the path alloc to include the real index
-                uint32_t alloc_sz = _strlen(v17->fileName) + 1 + sizeof(int);
-                v18 = (char *)JK_ALLOC(alloc_sz);
-                _strncpy(v18+sizeof(int), v17->fileName, alloc_sz-sizeof(int)-1); // Added: strcpy -> strncpy, +sizeof(int)
-                v18[alloc_sz-1] = 0;
-                v20 = jkGuiTitle_quicksave_related_func1(&strtable, v18+sizeof(int)); // Added: +sizeof(int)
-                jkGuiRend_DarrayReallocStr(array, v20, (intptr_t)v18);
+                jkEpisodeEntry* ent = &a8[i];
 
-                // Added
-                int* stash_idx = (int*)v18;
-                *stash_idx = v17->lineNum;
+                // Added: Include LEVEL entries and supported CUT entries.
+                if (ent->type)
+                {
+                    const char* ext = strrchr(ent->fileName, '.');
+
+                    if (!ext ||
+                        (__strcmpi(ext, ".jkl") &&
+                            __strcmpi(ext, ".san") &&
+                            __strcmpi(ext, ".smk")))
+                    {
+                        continue;
+                    }
+                }
+
+                // Added: Allocate space for the episode line number and filename.
+                uint32_t alloc_sz = _strlen(ent->fileName) + 1 + sizeof(int);
+                char* entryData = (char*)JK_ALLOC(alloc_sz);
+
+                if (!entryData)
+                    continue;
+
+                // Added: Preserve the episode line number.
+                *(int*)entryData = ent->lineNum;
+
+                _strncpy(
+                    entryData + sizeof(int),
+                    ent->fileName,
+                    alloc_sz - sizeof(int) - 1
+                );
+
+                entryData[alloc_sz - 1] = 0;
+
+                // Added: Resolve the display name using the existing title lookup.
+                char16_t* displayName =
+                    jkGuiTitle_quicksave_related_func1(
+                        &strtable,
+                        entryData + sizeof(int)
+                    );
+
+                if (!jkGuiRend_DarrayReallocStr(
+                    array,
+                    displayName,
+                    (intptr_t)entryData))
+                {
+                    JK_FREE(entryData);
+                }
             }
-            v17++;
-
-            --v23;
         }
-        while ( v23 >= 1 ); // Added: != -> >
     }
+    else
+    {
+        // Added: Preserve original debug-level filesystem discovery.
+        v22 = 0;
+        stdString_snprintf(tmp, 128, "episode\\%s\\jkl", episodeDir);
+        search = stdFileUtil_NewFind(tmp, 3, "JKL");
+        v13 = search;
+
+        if (search)
+        {
+            while (stdFileUtil_FindNext(search, &a2))
+            {
+                // Added: Allocate space for the filename and episode index.
+                uint32_t alloc_sz = _strlen(a2.fpath) + 1 + sizeof(int);
+                v14 = (char*)JK_ALLOC(alloc_sz);
+
+                if (!v14)
+                    continue;
+
+                _strncpy(v14 + sizeof(int), a2.fpath,
+                    alloc_sz - sizeof(int) - 1);
+                v14[alloc_sz - 1] = 0;
+
+                // Added: Filesystem entries have no known episode line number.
+                *(int*)v14 = 0;
+
+                v16 = jkGuiTitle_quicksave_related_func1(
+                    &strtable, v14 + sizeof(int));
+
+                if (!jkGuiRend_DarrayReallocStr(
+                    array, v16, (intptr_t)v14))
+                {
+                    JK_FREE(v14);
+                }
+                else
+                {
+                    ++v22;
+                }
+            }
+
+            stdFileUtil_DisposeFind(search);
+        }
+
+        // Added: Fall back to episode.jk LEVEL entries if no JKL files found.
+        if ((!v13 || !v22) && a8 && a6 > 0)
+        {
+            v23 = a6;
+            v17 = a8;
+
+            do
+            {
+                if (!v17->type)
+                {
+                    uint32_t alloc_sz =
+                        _strlen(v17->fileName) + 1 + sizeof(int);
+
+                    v18 = (char*)JK_ALLOC(alloc_sz);
+
+                    if (v18)
+                    {
+                        _strncpy(v18 + sizeof(int), v17->fileName,
+                            alloc_sz - sizeof(int) - 1);
+                        v18[alloc_sz - 1] = 0;
+
+                        // Added: Preserve the episode line number.
+                        *(int*)v18 = v17->lineNum;
+
+                        v20 = jkGuiTitle_quicksave_related_func1(
+                            &strtable, v18 + sizeof(int));
+
+                        if (!jkGuiRend_DarrayReallocStr(
+                            array, v20, (intptr_t)v18))
+                        {
+                            JK_FREE(v18);
+                        }
+                    }
+                }
+
+                v17++;
+                --v23;
+            } while (v23 >= 1);
+        }
+    }
+
     jkGuiRend_AddStringEntry(array, 0, 0);
     jkGuiRend_SetClickableString(element, array);
     element->selectedTextEntry = a3;
