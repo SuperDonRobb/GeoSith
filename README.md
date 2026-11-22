@@ -1,7 +1,7 @@
 # GeoSith
 
-An in-game level editor built on OpenJKDF2.
-Supply your own Jedi Knight installation during setup.
+An in-game level editor integrated into the OpenJKDF2 source in `engine/`.
+The supplied Jedi Knight installation stays in `JK/`.
 
 Run **Launch GeoSith.cmd**, then choose **Create New Level** in single player
 or on the multiplayer host screen. New levels contain one rectangular sector.
@@ -353,7 +353,7 @@ collision updates. The test verifies that frames were rendered; logs are saved
 as `build/stress.stdout.log` and `build/stress.stderr.log`.
 
 Upstream engine: https://github.com/shinyquagsire23/OpenJKDF2
-The upstream license is in `LICENSE.md`.
+The upstream license is in `engine/LICENSE.md`.
 
 Edit mode honors the normal screenshot binding (F12 by default), capturing the
 finished frame including editor highlights and HUD.
@@ -742,3 +742,65 @@ The staircase must fit below the existing ceiling with 0.25 units of headroom. E
 With weapon 1 **Select**, select two faces in the same sector and press **/**. This first clips an enclosing rectangular prism aligned between the two face centers and sized to contain both faces. Detailed beam-side cuts are then confined to the retained enclosure, keeping the surrounding partitions cleaner. It preserves the end faces and surrounding volume. Wall-to-floor connections are supported; warped sides use planar facets. It does not delete the resulting beam sector. **Ctrl+Z** undoes the complete operation.
 
 The 3D selection-cleave shortcut is now **/** (also numpad divide) for two vertices, two edges, or two faces. **C** no longer triggers a 3D selection cleave, leaving it available for crouch. Map-view line cleaving accepts C or / (including numpad divide).
+
+While holding Fire 1 for a line cleave with weapon 0, the local player's saber tip follows the cut endpoint in first- and third-person views. The cleave guide uses the red saber material. Releasing the button restores the normal saber rendering; gameplay collision and damage length are unchanged.
+
+### Resize a placed thing
+
+With weapon 3, point at a thing and press **Enter**, then choose **Generate**.
+Enter a positive **Scale** and press **ReSize**: `2` doubles its size, while `0.5`
+halves it. The generator replaces that placed thing with a new custom template;
+other instances retain their original size.
+
+The generated copy scales collision size, movement radius, physics height,
+actor offsets and dimensional particle parameters. It copies and scales the
+3DO (including hierarchy pivots), sprite or particle resource. Animated things
+receive a separate PUP and scaled KEY translations/velocities, preserving
+animation frames, markers and rotation. Playback speed is divided by the scale
+(2x size plays at half speed; 0.5x size plays at double speed). Textures and UVs retain their existing mapping.
+World position, orientation, COG references and path-frame locations are retained.
+Generated resources are included when saving the level and use the existing
+multiplayer resource synchronization. **Ctrl+Z** undoes the replacement.
+
+Resizing actors also creates a private AI file with scaled attack/follow distances
+and perception/step distances. Instant-hit weapon templates (including melee bites
+and punches) receive scaled reach. Damage, attack timing, angles and probabilities
+stay unchanged. Previously resized actors need to be recreated from the original
+at the desired scale to receive these additional settings.
+
+Resized enemies receive health and maximum health multiplied by the scale.
+Their primary and secondary model-based projectiles get private templates and
+scaled 3DOs, collision/movement sizes and physics heights. Projectile damage and
+travel speed are retained. Newly generated resources are saved and synchronized
+with the level. Recreate previously resized enemies from the original template
+to receive the new health, projectile and animation-speed settings.
+
+Resizing also copies SND sound classes and their referenced WAVs (including voice
+files), changing WAV playback rate inversely with size. A 2x thing sounds at half
+speed/lower pitch; a 0.5x thing sounds at double speed/higher pitch. Audio and
+animation slowdown is capped at 4x (one-quarter playback speed). Both SND
+audibility radii scale with size; volume and playback flags remain unchanged.
+Enlarged 3DOs keep only geoset 0 so distant models retain their full detail. These private resources
+save in the level GOB and use normal multiplayer resource synchronization.
+Original game resources are untouched. Recreate older resized things from the
+original to apply this feature. PCM mono/stereo 8-bit and 16-bit WAVs are supported;
+scales producing a playback rate outside 1000–384000 Hz are rejected safely.
+
+Resized things preserve their existing ground contact by adjusting the origin
+by the change in support height, rather than adding their full scaled height. Generated
+templates use names such as `kelldragon_8size` or `kelldragon_0p5size` and become
+the selected template in weapon 3. Duplicate names receive a numeric suffix
+instead of overwriting an existing template.
+
+Resizing an enemy also duplicates item pickups referenced by its actor COG,
+scales their visuals and collision dimensions, and assigns a private actor COG
+using those pickups. This covers death drops and Force Pull without changing
+stock pickups, ammunition amounts, or pickup behavior. Recreate older resized
+enemies from their original templates to apply the scaled drops.
+
+Resized projectiles also receive private normal-impact and flesh-impact explosion
+templates. Explosion damage, blast radius, and force scale up to a maximum of 4x.
+Sprites/models, particle sizes, and debris use the full size factor, including dependent smoke and debris-hit
+effects. Blast timing and light intensity stay unchanged; copied sounds keep
+the existing playback slowdown cap. This applies to enemy weapon copies and
+projectiles resized directly. Recreate older resized things to apply it.

@@ -21,6 +21,7 @@ enum JKSABER_SPARKTYPE_E
     SPARKTYPE_SABER = 2,
 };
 
+void jkSaber_DrawEditorBlade(SithThing *owner,rdThing *line,rdMatrix34 *base);
 void jkSaber_Startup();
 void jkSaber_Shutdown();
 void jkSaber_InitializeSaberInfo(SithThing *thing, char *material_side_fname, char *material_tip_fname, flex_t base_rad, flex_t tip_rad, flex_t len, SithThing *wall_sparks, SithThing *blood_sparks, SithThing *saber_sparks);

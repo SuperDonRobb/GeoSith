@@ -61,6 +61,7 @@ static int syncCustomTemplates(const EdModel *source){
     SithWorld *world=sithWorld_g_pCurrentWorld;if(!world||!edTemplatesValidate(source))return 0;
     if(customRegistryWorld!=world){resetCustomTemplates();customRegistryWorld=world;}
     if(!syncSavedModels(source))return 0;
+    int firstNewCog=world->numCogs;
     int changed=0;unsigned char done[ED_CUSTOM_TEMPLATES]={0};
     for(int pass=0;pass<source->templateCount;pass++)for(int i=0;i<source->templateCount;i++)if(!done[i]){
         const EdTemplate *t=&source->templates[i];int parent=edTemplateIndex(source,t->parent);if(parent>=0&&!done[parent])continue;
@@ -97,6 +98,17 @@ static int syncCustomTemplates(const EdModel *source){
         if(!known&&templateCount<EDITOR_TEMPLATES){snprintf(templateNames[templateCount++],128,"%s",t->name);changed=1;}done[i]=1;
     }
     for(int i=0;i<source->templateCount;i++)if(!done[i])return 0;
+    // sithCog_Load only copies unresolved symbols. Normally sithCog_Open binds
+    // them during level startup, but editor-created class COGs arrive later.
+    // Wait until all templates exist so forward pickup references resolve too.
+    for(int i=firstNewCog;i<world->numCogs;i++){
+        sithCog *c=&world->aCogs[i];if(!(c->flags&SITH_COG_CLASS)||!c->pScript||!c->pSymbolTable)continue;
+        for(unsigned j=0;j<c->pScript->numSymbolRefs;j++){
+            SithCogSymbolRef *ref=&c->pScript->aSymRefs[j];
+            if(ref->value[0])sithCog_ParseSymbolRef(&c->pSymbolTable->aSymbols[ref->hash],ref,ref->value);
+        }
+    }
+
     for(int j=0;j<templateCount;){int hidden=0;for(int i=0;i<customRegisteredCount;i++)if(!strcmp(templateNames[j],customRegistered[i])&&edTemplateIndex(source,templateNames[j])<0)hidden=1;
         if(hidden){memmove(templateNames+j,templateNames+j+1,(--templateCount-j)*sizeof(templateNames[0]));changed=1;}else j++;}
     if(changed){clearObjectPreviews();templateMetadata();if(currentTemplate>=templateCount)currentTemplate=0;}

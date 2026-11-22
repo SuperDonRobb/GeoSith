@@ -44,6 +44,7 @@ static void captureThingAttributes(jkGuiMenu *menu){static int ticks;if(++ticks%
 #endif
     menu->lastClicked=frameMenuCaptureStage++<3?2:1;
 }
+#include "jkEditorResize.h"
 static void thingAttributesDialog(int id){
     EdThingAttributes draft=*thingAttributes(model,id);EdFrame pose=thingPose(model,id);int selected=0,previousModal=jkMain_bInModalGui;jkMain_bInModalGui=1;sithTime_Pause();stdControl_SetActivation(0);
     SithThing *player=sithWorld_g_pCurrentWorld->pLocalPlayer;rdVector_Zero3(&player->physicsParams.vel);rdVector_Zero3(&player->physicsParams.acceleration);
@@ -61,9 +62,9 @@ static void thingAttributesDialog(int id){
         snprintf(text,sizeof(text),"0x%08X",draft.hasFlags?draft.flags:0);if(!draft.hasFlags){SithThing *t=sithTemplate_GetTemplate(thingTemplate(model,id));if(t)snprintf(text,sizeof(text),"0x%08X",t->flags);}stdString_CharToWchar(inputs[12],text,64);
         e[29]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{20,300,90,28},1};e[30]=jkGuiElement{ELEMENT_TEXTBOX,0,0,NULL,63,{114,300,182,28},1};
         e[31]=jkGuiElement{ELEMENT_TEXTBUTTON,4,0,NULL,3,{330,300,72,30},draft.frameCount>1};e[32]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{407,301,125,28},1};e[33]=jkGuiElement{ELEMENT_TEXTBUTTON,5,0,NULL,3,{536,300,72,30},draft.frameCount>1};
-        e[34]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{20,353,600,48},1};e[35]=jkGuiElement{ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,423,230,40},1};e[36]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,423,230,40},1};e[37].type=ELEMENT_END;
+        e[34]=jkGuiElement{ELEMENT_TEXT,0,0,NULL,3,{20,378,600,32},1};e[35]=jkGuiElement{ELEMENT_TEXTBUTTON,1,2,NULL,3,{350,423,230,40},1};e[36]=jkGuiElement{ELEMENT_TEXTBUTTON,-1,2,"GUI_CANCEL",3,{60,423,230,40},1};e[37]=jkGuiElement{ELEMENT_TEXTBUTTON,6,0,NULL,3,{20,337,200,30},id>=0};e[38].type=ELEMENT_END;
         jkGuiMenu menu={e,-1,0xffff,0xffff,15,0,0,jkGui_stdBitmaps,jkGui_stdFonts};jkGui_InitMenu(&menu,jkGui_stdBitmaps[JKGUI_BM_BK_ESC]);e[0].wstr=title;e[1].wstr=u"Thing position / rotation";e[2].wstr=count;e[3].wstr=u"+";e[4].wstr=u"-";
-        for(int j=0;j<12;j++){e[5+j*2].wstr=labels[j%6];e[6+j*2].wstr=inputs[j];}e[29].wstr=u"Thing flags";e[30].wstr=inputs[12];e[31].wstr=u"<";e[32].wstr=frameLabel;e[33].wstr=u">";e[34].wstr=u"+ adds a frame; - removes the displayed frame.\nIn weapon 3, grab a red frame or its rotation circle.";e[35].wstr=u"Apply";
+        for(int j=0;j<12;j++){e[5+j*2].wstr=labels[j%6];e[6+j*2].wstr=inputs[j];}e[29].wstr=u"Thing flags";e[30].wstr=inputs[12];e[31].wstr=u"<";e[32].wstr=frameLabel;e[33].wstr=u">";e[34].wstr=u"+ adds a frame; - removes the displayed frame.\nIn weapon 3, grab a red frame or its rotation circle.";e[35].wstr=u"Apply";e[37].wstr=u"Generate";
         if(getenv("GEOSITH_FRAMES_CAPTURE")&&getenv("GEOSITH_STRESS"))menu.idkFunc=captureThingAttributes;
         jkGuiRend_MenuSetReturnKeyShortcutElement(&menu,&e[35]);jkGuiRend_MenuSetEscapeKeyShortcutElement(&menu,&e[36]);int choice=jkGuiRend_DisplayAndReturnClicked(&menu);freeMenuStrings(e);if(choice<0)break;
         int valid=1;for(int j=0;j<12;j++){if(j>=6&&!draft.frameCount)continue;char *end;stdString_WcharToChar(text,inputs[j],sizeof(text));values[j]=strtod(text,&end);if(end==text||*end||!isfinite(values[j]))valid=0;}
@@ -74,6 +75,7 @@ static void thingAttributesDialog(int id){
         if(choice==2){addThingFrame(&draft,pose);selected=draft.frameCount-1;}
         else if(choice==3&&draft.frameCount){memmove(&draft.frames[selected],&draft.frames[selected+1],(draft.frameCount-selected-1)*sizeof(EdFrame));draft.frames[--draft.frameCount]=EdFrame{0};draft.pathOverride=1;if(selected>=draft.frameCount)selected=draft.frameCount?draft.frameCount-1:0;}
         else if(choice==4)selected=(selected+draft.frameCount-1)%draft.frameCount;else if(choice==5)selected=(selected+1)%draft.frameCount;
+        else if(choice==6){if(thingGenerateDialog(id,draft,pose))break;}
         else if(choice==1){if(objectSector(model,pose.position)<0){jkGuiDialog_ErrorDialog(u"Thing Attributes",u"The thing position must be inside a sector.");continue;}edCopyModel(candidate,model);*thingAttributes(candidate,id)=draft;setThingPose(candidate,id,pose);remember();if(commit()){say("Thing attributes updated. Red previews are path frames; Ctrl+Z undoes.");break;}}
     }
     jkGui_SetModeGame();jkMain_SetVideoMode();sithTime_Resume();jkMain_bInModalGui=previousModal;stdControl_SetActivation(1);stdControl_Flush();fireDown=grabDown=middleDown=1;

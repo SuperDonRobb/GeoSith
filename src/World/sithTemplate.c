@@ -183,11 +183,15 @@ SithThing* sithTemplate_GetTemplate(const char *pName)
 
 static SithThing* sithTemplate_ParseInternal(SithWorld *pWorld,int strict)
 {
+    // Live editor templates are parsed without an open conffile. Resource
+    // loaders can replace the global argument entry; retain this template
+    // line while loading its puppet, sprite or particle dependencies.
+    StdConffileEntry templateEntry = stdConffile_g_entry;
     SithThing *result;
     SithThing tmp;
     const char* aName;
 
-    result = (SithThing *)stdHashtbl_Find(sithTemplate_pHashtable, (const char*)stdConffile_g_entry.aArgs[0].value);
+    result = (SithThing *)stdHashtbl_Find(sithTemplate_pHashtable, (const char*)templateEntry.aArgs[0].value);
     SithThing *replacement=strict==2?result:NULL;
     if ( result && !replacement )return result;
 
@@ -196,10 +200,10 @@ static SithThing* sithTemplate_ParseInternal(SithWorld *pWorld,int strict)
     memset(&tmp, 0, sizeof(tmp));
 
     sithThing_Reset(&tmp);
-    result = (SithThing *)stdHashtbl_Find(sithTemplate_pHashtable, (const char*)stdConffile_g_entry.aArgs[1].value);
+    result = (SithThing *)stdHashtbl_Find(sithTemplate_pHashtable, (const char*)templateEntry.aArgs[1].value);
     sithThing_SetThingBasedOn(&tmp, result);
 
-    aName = stdConffile_g_entry.aArgs[0].value;
+    aName = templateEntry.aArgs[0].value;
 #ifdef SITH_DEBUG_STRUCT_NAMES
     stdString_SafeStrCopy(tmp.aName, aName, sizeof(tmp.aName));
 #endif
@@ -207,9 +211,9 @@ static SithThing* sithTemplate_ParseInternal(SithWorld *pWorld,int strict)
     tmp.templateNameCrc = stdCrc32(aName, strlen(aName));
 #endif
 
-    for (int i = 2; i < stdConffile_g_entry.numArgs; i++)
+    for (int i = 2; i < templateEntry.numArgs; i++)
     {
-        if (!sithThing_ParseArg(&stdConffile_g_entry.aArgs[i], &tmp) && strict) {
+        if (!sithThing_ParseArg(&templateEntry.aArgs[i], &tmp) && strict) {
             rdThing_FreeEntry(&tmp.renderData);
             if(tmp.moveType==SITH_MT_PATH&&tmp.trackParams.aFrames)SITH_FREE(tmp.trackParams.aFrames);
             return NULL;

@@ -408,6 +408,7 @@ static int stressCogs(SithThing *p){static int step;
 
 static int stressDestructible(SithThing *player){
     static int frame;stressRunning=1;active=1;tool=1;if(frame++<5)return 1;
+    if(getenv("GEOSITH_RESIZE_TEST")){int result=resizeSelfTest();fflush(stdout);sithSound_Shutdown();exit(result?0:2);}
     if(getenv("GEOSITH_SPIRAL_TEST")){int result=spiralTest();if(!result)return 1;fflush(stdout);sithSound_Shutdown();exit(result>0?0:2);}
     if(getenv("GEOSITH_BEVEL_TEST")){int result=bevelTest();if(!result)return 1;fflush(stdout);sithSound_Shutdown();exit(result>0?0:2);}
     if(getenv("GEOSITH_HAZARD_TEST")){

@@ -1,4 +1,5 @@
 #include "jkSaber.h"
+#include "Main/jkEditor.h"
 
 #include "World/jkPlayer.h"
 #include "Engine/rdroid.h"
@@ -84,6 +85,24 @@ void jkSaber_PolylineRand(rdThing *thing)
     }
 }
 
+// Share the render-only cleave pose between POV and third-person sabers.
+// Never aim another player's blade at this client's local edit endpoint.
+void jkSaber_DrawEditorBlade(SithThing *owner,rdThing *line,rdMatrix34 *base)
+{
+    rdMatrix34 pose;
+    flex_t length;
+    if (owner == playerThings[playerThingIdx].actorThing && line->polyline &&
+        jkEditor_CleaveSaberPose(base, &pose, &length))
+    {
+        rdThing preview = *line;
+        rdPolyline blade = *line->polyline;
+        blade.length = length;
+        preview.polyline = &blade;
+        rdThing_Draw(&preview, &pose);
+    }
+    else rdThing_Draw(line, base);
+}
+
 void jkSaber_Draw(rdMatrix34* posRotMat)
 {
     if (playerThings[playerThingIdx].actorThing->jkFlags & JKFLAG_SABERON
@@ -100,11 +119,9 @@ void jkSaber_Draw(rdMatrix34* posRotMat)
         // Added: Mark the player's saber for custom RGB rendering.
         jkSaber_rgbDrawActive = jkSaber_rgbEnabled;
 
-        // Right-hand saber
-        rdThing_Draw(
+        jkSaber_DrawEditorBlade(playerThings[playerThingIdx].actorThing,
             &playerThings[playerThingIdx].polylineThing,
-            &playerThings[playerThingIdx].povModel.paJointMatrices[5]
-        );
+            &playerThings[playerThingIdx].povModel.paJointMatrices[5]);
 
         // Added: Dual sabers
         if (playerThings[playerThingIdx].actorThing->jkFlags & JKFLAG_DUALSABERS)

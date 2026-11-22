@@ -122,3 +122,7 @@ add_executable(manifest_template_tests manifest_template_test.cpp)
 target_include_directories(manifest_template_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_features(manifest_template_tests PRIVATE cxx_std_17)
 add_test(NAME manifest_templates COMMAND manifest_template_tests)
+
+add_executable(resize_resource_tests resize_resource_test.cpp)
+target_compile_features(resize_resource_tests PRIVATE cxx_std_20)
+add_test(NAME resize_resources COMMAND resize_resource_tests)

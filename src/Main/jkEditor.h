@@ -28,6 +28,7 @@ int jkEditor_Fullbright(void);
 int jkEditor_MapActive(void);
 void jkEditor_Draw(void);
 void jkEditor_DrawWorld(void);
+int jkEditor_CleaveSaberPose(const rdMatrix34 *base,rdMatrix34 *pose,flex_t *length);
 void jkEditor_SaveDialog(void);
 void jkEditor_HeaderDialog(void);
 void jkEditor_EpisodeDialog(void);

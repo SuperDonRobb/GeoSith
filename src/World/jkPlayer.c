@@ -1166,7 +1166,7 @@ void jkPlayer_renderSaberWeaponMesh(SithThing *thing)
                     jkSaber_rgbEnabled &&
                     (thing == sithPlayer_g_pLocalPlayerThing);
 
-                rdThing_Draw(&playerInfo->polylineThing, primaryMat);
+                jkSaber_DrawEditorBlade(thing, &playerInfo->polylineThing, primaryMat);
 
                 if (thing->jkFlags & JKFLAG_DUALSABERS)
                 {
@@ -1196,7 +1196,7 @@ void jkPlayer_renderSaberWeaponMesh(SithThing *thing)
                 jkSaber_rgbEnabled &&
                 (thing == sithPlayer_g_pLocalPlayerThing);
 
-            rdThing_Draw(&playerInfo->polylineThing, primaryMat);
+            jkSaber_DrawEditorBlade(thing, &playerInfo->polylineThing, primaryMat);
 
             if (thing->jkFlags & JKFLAG_DUALSABERS)
             {

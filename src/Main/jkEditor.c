@@ -257,6 +257,7 @@ static void thingGeneratorTestMenu(jkGuiMenu*);
 static int windTest(SithThing *player);
 static void windMenuTest(jkGuiMenu *menu);
 static int spiralTest();
+static int resizeSelfTest();
 static int spiralActive();
 static int spiralCancel();
 static int spiralControl();
@@ -3040,6 +3041,15 @@ int jkEditor_Control(SithThing *p,flex_t delta)try {
     }
     return result;
 } catch(const std::bad_alloc&) {say("Editor operation stopped: not enough memory.");return 1;}
+// A render-only pose: never alter the saber's gameplay length or joints.
+int jkEditor_CleaveSaberPose(const rdMatrix34 *base,rdMatrix34 *pose,flex_t *bladeLength){
+    if(!active||mapActive||tool!=10||!cleaving||builderAsset>=0||!base||!pose||!bladeLength)return 0;
+    if(selection.cell<0||selection.cell>=model->count||selection.face<0||selection.face>=model->c[selection.cell].count)return 0;
+    EdVec target=edAdd(cleaveEnd,edScale(edNormal(&model->c[selection.cell].f[selection.face]),.001));
+    EdVec delta=edSub(target,vec(base->scale));double distance=sqrt(edDot(delta,delta));
+    if(!std::isfinite(distance)||distance<=ED_EPS)return 0;
+    rdVector3 look=rdvec(edScale(delta,1/distance));rdMatrix_BuildFromLook34(pose,&look);pose->scale=base->scale;*bladeLength=(flex_t)distance;return 1;
+}
 void jkEditor_DrawWorld(void) try {
     editorViewReady=0;
     if(jkEditor_IsLevel()&&boundWorld==sithWorld_g_pCurrentWorld&&rdCamera_g_pCurCamera)builderDrawWorld();
@@ -3064,7 +3074,7 @@ void jkEditor_DrawWorld(void) try {
     if(!cogPicking())drawFrameGhosts();
     int shapePreview=tool==10&&cleaveShape&&!grabbing&&hover.cell>=0;
     if(!cleaving&&!shapePreview)return;
-    if(!bladeReady) {if(!rdPolyline_NewEntry(&cleaveBlade,"Editor cleave","sabergreen1.mat","sabergreen0.mat",.01,.004,.004,RD_GEOMETRY_FULL,RD_LIGHTMODE_FULLYLIT,RD_TEXTUREMODE_PERSPECTIVE,1))return;rdThing_NewEntry(&cleaveThing,NULL);rdThing_SetPolyline(&cleaveThing,&cleaveBlade);bladeReady=1;}
+    if(!bladeReady) {if(!rdPolyline_NewEntry(&cleaveBlade,"Editor cleave","saberred1.mat","saberred0.mat",.01,.004,.004,RD_GEOMETRY_FULL,RD_LIGHTMODE_FULLYLIT,RD_TEXTUREMODE_PERSPECTIVE,1))return;rdThing_NewEntry(&cleaveThing,NULL);rdThing_SetPolyline(&cleaveThing,&cleaveBlade);bladeReady=1;}
     const EdFace *face=shapePreview?&model->c[hover.cell].f[hover.face]:&model->c[selection.cell].f[selection.face];EdFace outline;EdVec n=edNormal(face);
     if(shapePreview&&edClipShape(face,hover.point,shapeRadius,cleaveShape,shapeRotation,&outline)!=1)return;
     for(int i=0;i<(shapePreview?outline.count:1);i++){
